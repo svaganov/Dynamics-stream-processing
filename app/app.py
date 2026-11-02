@@ -405,7 +405,11 @@ def save_config(cfg):
         merged = copy.deepcopy(doc["streams"][0])
         _deep_merge(merged, station_update)
         doc["streams"][0] = _normalize_station(merged, fallback_id=doc["streams"][0]["id"], fallback_name=doc["streams"][0]["name"])
-        doc["settings"]["ffmpeg_path"] = str(cfg.get("ffmpeg_path") or "")
+        # Ключ ffmpeg_path перезаписываем только если клиент его явно прислал:
+        # новый UI работает через /api/settings и не включает путь в плоский
+        # конфиг — без этой проверки любой старт/сохранение затирали бы его.
+        if "ffmpeg_path" in cfg:
+            doc["settings"]["ffmpeg_path"] = str(cfg.get("ffmpeg_path") or "")
         _save_streams_unlocked(doc)
         return load_config()
 
@@ -1726,8 +1730,14 @@ def _listen_response(cfg, which, station_id=None):
         delay_max = cfg["source"].get("reconnect_delay_max", 5)
     elif which == "output":
         ice = cfg["icecast"]
+        host = str(ice["host"])
+        # Имя хоста из Docker-контура (host.docker.internal и т.п.) с хоста
+        # панели недоступно: Icecast публикуется на loopback — слушаем его.
+        if host.lower() in ("host.docker.internal", "host.containers.internal",
+                            "gateway.docker.internal"):
+            host = "127.0.0.1"
         url = "http://{}:{}/{}".format(
-            ice["host"], ice["port"], str(ice["mount"]).lstrip("/"))
+            host, ice["port"], str(ice["mount"]).lstrip("/"))
         reconnect, delay_max = False, 5
     else:
         return jsonify({"ok": False, "error": "unknown stream"}), 404

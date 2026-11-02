@@ -65,9 +65,9 @@ class LiquidsoapSandboxTest(unittest.TestCase):
         raw_mp3 = self.tmp_path / "source-raw.mp3"
         subprocess.run([
             self.ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
-            "-f", "lavfi", "-i", "sine=frequency=440:duration=20",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=120",
             "-vn", "-c:a", "libmp3lame", "-b:a", "64k", str(raw_mp3),
-        ], check=True, timeout=30)
+        ], check=True, timeout=60)
         source_body, actual_metaint = base.add_icy_metadata(raw_mp3.read_bytes(), self.title)
         self.assertIn(self.title.encode(), source_body)
 
@@ -102,6 +102,7 @@ class LiquidsoapSandboxTest(unittest.TestCase):
             "source": {"url": host_url(self.source_port, "/source.mp3"), "reconnect": True, "reconnect_delay_max": 1},
             "icecast": {"host": HOST_DOCKER_INTERNAL, "port": self.icecast_port, "mount": "/station-2"},
             "autorestart": {"enabled": False, "delay": 1},
+            "gain": {"enabled": True, "db": 0.0},
             "equalizer": {"enabled": True, "gains": [2, 0, 0, 0, 1, 0, 0, 0, 0, 0]},
         })
 
@@ -199,11 +200,17 @@ class LiquidsoapSandboxTest(unittest.TestCase):
     def test_live_gain_adjust_without_restart(self):
         res = self.client.post("/api/streams/" + self.station2_id + "/start").get_json()
         self.assertTrue(res["ok"], res)
-        self.wait_for_body("/station-2", 20000)
+        self.wait_for_body("/station-2", 50000)
 
         manager = panel.get_manager(self.station2_id)
 
         # Live-подстройка +6 дБ применяется без перезапуска воркера.
+        # Внимание: слышимость подстройки (уровень сигнала) в этом фикстном
+        # контуре не проверяем — троттлинг источника и буфер input.http
+        # (max_buffer=10 с) делают тайминг непредсказуемым. Форм-регрессии
+        # «значение запеклось при старте» ловятся юнит-тестами генератора
+        # (getter-форма amplify/filter.iir.eq.peak), а поведение на реальном
+        # эфире — ручными замерами уровня volumedetect.
         res = self.client.post(
             "/api/streams/{}/adjust".format(self.station2_id), json={"gain_db": 6}).get_json()
         self.assertTrue(res["ok"], res)
@@ -275,9 +282,11 @@ class LiquidsoapSandboxTest(unittest.TestCase):
 
         manager = panel.get_manager(self.station2_id)
 
-        # Поднимаем полосу 1000 Гц до +6 дБ живьём.
+        # Поднимаем полосы 250 и 500 Гц до +12 дБ живьём (слышимость
+        # подстройки здесь не проверяем — см. примечание в gain-тесте).
         gains = [0.0] * 10
-        gains[5] = 6.0
+        gains[3] = 12.0  # 250 Гц
+        gains[4] = 12.0  # 500 Гц
         res = self.client.post(
             "/api/streams/{}/adjust".format(self.station2_id),
             json={"eq_gains": gains}).get_json()
@@ -286,9 +295,9 @@ class LiquidsoapSandboxTest(unittest.TestCase):
 
         host_port = manager.telnet_host_port()
         self.assertIsNotNone(host_port, "telnet-порт воркера не опубликован")
-        # воркер печатает значение с точностью до 3 знаков: «6.000»
-        out = panel._telnet_command(host_port[0], host_port[1], "var.get panel_eq_1000")
-        self.assertAlmostEqual(float(out.strip().splitlines()[0].strip()), 6.0, places=2)
+        # воркер печатает значение с точностью до 3 знаков: «12.000»
+        out = panel._telnet_command(host_port[0], host_port[1], "var.get panel_eq_250")
+        self.assertAlmostEqual(float(out.strip().splitlines()[0].strip()), 12.0, places=2)
 
         # Значения сохранились в реестре.
         station = self.client.get("/api/streams/" + self.station2_id).get_json()["station"]

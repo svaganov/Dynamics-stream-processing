@@ -7,23 +7,26 @@
 EQ (10 полос) → усиление → компрессор → loudnorm (динамический) → лимитер,
 затем AAC (FDK) → Icecast. Метаданные ICY идут сквозь конвейер автоматически.
 
-Усиление вынесено из ffmpeg-графа в amplify(panel_gain(), s): panel_gain —
-интерактивная переменная, поэтому панель может подстраивать громкость
-работающего воркера без перезапуска (telnet: var.set panel_gain = <линейн.>).
+Усиление — amplify(panel_gain, s): panel_gain — интерактивная переменная,
+передаётся в amplify как геттер () -> float (саму функцию, не вызов —
+иначе значение «запеклось» бы при старте), поэтому панель подстраивает
+громкость работающего воркера без перезапуска (telnet: var.set panel_gain = <линейн.>).
+
+Полосы EQ — нативные IIR-пики filter.iir.eq.peak с gain-геттерами
+panel_eq_<частота> (ffmpeg-вариант принимал gain только статически и живьём
+не менялся): любую полосу (в том числе с нуля) можно подстроить на
+работающем воркере (telnet: var.set panel_eq_1000 = 3.0).
 
 Обработанный сигнал собирается в отдельную ветку proc, а выход воркера —
 switch на интерактивной переменной panel_bypass: панель переключает
 BYPASS работающего воркера живьём (telnet: var.set panel_bypass = true|false).
-
-Полосы EQ — тоже интерактивные переменные panel_eq_<частота>: любую полосу
-(в том числе с нуля) можно подстроить на работающем воркере
-(telnet: var.set panel_eq_1000 = 3.0).
 """
 
 EQ_FREQS = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]
 
-# ffmpeg equalizer width_type: 0=h (Гц), 1=q, 2=o (октавы), 3=s (slope), 4=k (кГц)
-EQ_WIDTH_TYPE_OCTAVE = 2
+# Q IIR-пиковой полосы ≈ ширина 1 октава (аналог w=1. у бывшего
+# ffmpeg.filter.equalizer): Q = sqrt(2^bw)/(2^bw - 1), bw=1 -> 1.4142.
+EQ_PEAK_Q = 1.41
 
 # Telnet-сервер воркера внутри контейнера. Панель публикует порт на 127.0.0.1
 # хоста со случайным портом и находит его через Docker API.
@@ -57,20 +60,30 @@ def eq_var_name(freq):
     return "panel_eq_{}".format(int(freq))
 
 
-def _eq_calls(cfg):
+def _eq_chain(cfg, src="s", dst="proc"):
+    """10-полосный EQ цепочкой нативных IIR-пиковых фильтров.
+
+    ffmpeg.filter.equalizer внутри ffmpeg-графа принимает gain только как
+    статический float — значения «запекались» при старте и живьём не менялись.
+    Нативный filter.iir.eq.peak принимает gain-геттер () -> float и перечитывает
+    его каждый кадр: полосы реально подстраиваются telnet-командой
+    «var.set panel_eq_<f> = <дБ>» без перезапуска воркера. q=1.41 ≈ ширина 1 октава
+    (та, что раньше задавалась w=1. у ffmpeg-equalizer)."""
     eq = cfg.get("equalizer", {})
     if not eq.get("enabled"):
-        return []
-    # Все 10 полос — с интерактивным gain: панель подстраивает любую полосу
-    # (в т.ч. с нуля) живьём. Нулевая полоса — фильтр-пропускание, как и раньше.
-    calls = []
+        return None
+    lines = ["# --- EQ (10 полос, нативные IIR-пики — gain живой) ---"]
+    current = src
     for freq in EQ_FREQS:
-        calls.append(
-            "ffmpeg.filter.equalizer(f={f}, t={t}, w=1., g={g}(), graph, ".format(
-                f=_f(freq), t=EQ_WIDTH_TYPE_OCTAVE, g=eq_var_name(freq)
-            )
-        )
-    return calls
+        nxt = "eq_{}hz".format(freq)
+        lines.append(
+            "{dst} = filter.iir.eq.peak(frequency={f}, q={q}, gain={g}, {src})".format(
+                dst=nxt, f=_f(float(freq)), q=_f(EQ_PEAK_Q),
+                g=eq_var_name(freq), src=current))
+        current = nxt
+    if current != dst:
+        lines.append("{dst} = {src}".format(dst=dst, src=current))
+    return "\n".join(lines)
 
 
 def _eq_interactive_vars(cfg):
@@ -117,7 +130,9 @@ def _limiter_call(cfg):
     if not lim.get("enabled"):
         return None
     ceiling = db_to_linear(lim.get("ceiling_db", -1.0))  # alimiter limit — линейный
-    return "ffmpeg.filter.alimiter(limit={c}, attack={a}, release={r}, graph, ".format(
+    # level=false — без авто-подъёма: иначе alimiter не ограничивает пики,
+    # а поднимает весь сигнал к потолку и пики проскакивают (max 0 dBFS).
+    return "ffmpeg.filter.alimiter(limit={c}, attack={a}, release={r}, level=false, graph, ".format(
         c=_f(ceiling), a=_f(lim.get("attack", 5)), r=_f(lim.get("release", 50)),
     )
 
@@ -154,12 +169,13 @@ def _gain_block(cfg, src="proc", dst="proc"):
     gain = cfg.get("gain") or {}
     if not gain.get("enabled"):
         return None
-    db = float(gain.get("db", 0.0))
-    if abs(db) <= 0.01:
-        return None
+    # Блок включаем всегда, когда усиление включено — даже при 0 дБ:
+    # иначе живое управление panel_gain пропадёт из цепочки.
     return (
-        "# --- усиление: amplify(panel_gain(), {src}) — живьём через telnet ---\n"
-        "{dst} = amplify(panel_gain(), {src})".format(src=src, dst=dst)
+        "# --- усиление: amplify(panel_gain, {src}) — живьём через telnet ---\n"
+        "# (передаём саму функцию () -> float: amplify перечитывает её каждый кадр;\n"
+        "#  вызов panel_gain() «запек» бы значение на момент старта скрипта)\n"
+        "{dst} = amplify(panel_gain, {src})".format(src=src, dst=dst)
     )
 
 
@@ -188,14 +204,14 @@ def _processing_block(cfg):
     if cfg.get("bypass"):
         return None
 
-    eq_calls = _eq_calls(cfg)
+    eq_chain = _eq_chain(cfg)
     gain_block = _gain_block(cfg)
     dyn_calls = []
     for stage in (_compressor_call(cfg), _loudnorm_call(cfg), _limiter_call(cfg)):
         if stage:
             dyn_calls.append(stage)
 
-    if not (eq_calls or gain_block or dyn_calls):
+    if not (eq_chain or gain_block or dyn_calls):
         return None  # всё выключено — декод/код без фильтров, live-BYPASS не нужен
 
     parts = [
@@ -204,10 +220,8 @@ def _processing_block(cfg):
     ]
 
     def _raw_wrapped(graph_block, comment, src, dst):
-        # ffmpeg-фильтры работают поверх raw-формата: encode → граф → decode.
-        # Каждый граф — со своей парой encode/decode: amplify требует PCM-источник
-        # (raw-источник ему не подходит по типам), поэтому усиление живёт
-        # в PCM-домене между двумя raw-графами.
+        # ffmpeg-фильтры (динамика) работают поверх raw-формата:
+        # encode → граф → decode. EQ (IIR) и усиление нативные, PCM-домен.
         return "\n\n".join([
             "# raw-обёртка: {c}\n"
             "{dst} = ffmpeg.raw.encode.audio(%ffmpeg(%audio.raw), {src})".format(
@@ -217,12 +231,8 @@ def _processing_block(cfg):
         ])
 
     current = "s"
-    if eq_calls:
-        # encode пишет raw в proc — граф читает треки proc (raw), не current;
-        # после decode proc снова PCM.
-        eq_block = _graph_block("eq_mkfilter", "EQ (10 полос)", eq_calls,
-                                src="proc", dst="proc")
-        parts.append(_raw_wrapped(eq_block, "EQ-граф", current, "proc"))
+    if eq_chain:
+        parts.append(_eq_chain(cfg, src=current, dst="proc"))
         current = "proc"
     if gain_block:
         parts.append(_gain_block(cfg, src=current, dst="proc"))

@@ -386,6 +386,7 @@ function updateStationHeader() {
 async function loadStreams(selectId) {
   const data = await (await fetch("/api/streams")).json();
   streamsDoc = data;
+  $("ffmpeg_path").value = (streamsDoc.settings && streamsDoc.settings.ffmpeg_path) || "";
   stationMap = new Map(streamsDoc.streams.map((s) => [s.id, s]));
   if (selectId && stationMap.has(selectId)) currentStationId = selectId;
   renderStationSelect();
@@ -490,6 +491,7 @@ async function saveSelected() {
         return false;
       }
       streamsDoc.settings.ffmpeg_path = settingsData.settings.ffmpeg_path || "";
+      $("ffmpeg_path").value = streamsDoc.settings.ffmpeg_path;
     }
 
     const res = await fetch("/api/streams/" + encodeURIComponent(currentStationId), {
@@ -576,17 +578,23 @@ function stopListen() {
 
 async function toggleListen(which) {
   if (listening === which) { stopListen(); return; }
-  if (!(await saveSelected())) return;
   audio.pause();
   audio.volume = $("listen_vol").value / 100;
   audio.src = "/api/streams/" + encodeURIComponent(currentStationId) +
     "/listen/" + which + "?t=" + Date.now();
   listening = which;
   updateListenUI();
+  // play() вызываем синхронно, в том же жесте клика: после любого await
+  // браузер считает жест потраченным и блокирует автовоспроизведение.
+  const playPromise = audio.play();
+  const saved = await saveSelected();
   try {
-    await audio.play();
+    await playPromise;
   } catch (e) {
-    toast("Браузер заблокировал воспроизведение", true);
+    toast((saved
+      ? "Браузер заблокировал воспроизведение"
+      : "Настройки не сохранены — воспроизведение отменено") +
+      " [" + (e && e.name) + ": " + (e && e.message) + "]", true);
     stopListen();
   }
 }
@@ -662,6 +670,29 @@ $("btnGainLive").addEventListener("click", async () => {
   } catch (e) {
     toast("Не удалось подстроить", true);
   }
+});
+
+/* Автоприменение gain: для работающей Liquidsoap-станции движение ползунка
+   само шлёт живую подстройку (с короткой задержкой после остановки). */
+let gainLiveTimer = null;
+$("gain_db").addEventListener("input", () => {
+  if ($("engine").value !== "liquidsoap" || !currentRunning) return;
+  if (!$("gain_enabled").checked) return;
+  clearTimeout(gainLiveTimer);
+  gainLiveTimer = setTimeout(async () => {
+    const db = parseFloat($("gain_db").value);
+    try {
+      const res = await fetch("/api/streams/" + encodeURIComponent(currentStationId) + "/adjust", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ gain_db: db }),
+      });
+      const data = await res.json();
+      if (!data.ok) toast(data.error || "Не удалось подстроить gain", true);
+    } catch (e) {
+      toast("Не удалось подстроить gain", true);
+    }
+  }, 400);
 });
 
 /* Живой BYPASS: для работающей Liquidsoap-станции переключатель шлёт
