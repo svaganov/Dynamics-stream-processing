@@ -268,6 +268,38 @@ class LiquidsoapSandboxTest(unittest.TestCase):
         station = self.client.get("/api/streams/" + self.station2_id).get_json()["station"]
         self.assertFalse(station["bypass"])
 
+    def test_live_eq_adjust_without_restart(self):
+        res = self.client.post("/api/streams/" + self.station2_id + "/start").get_json()
+        self.assertTrue(res["ok"], res)
+        self.wait_for_body("/station-2", 20000)
+
+        manager = panel.get_manager(self.station2_id)
+
+        # Поднимаем полосу 1000 Гц до +6 дБ живьём.
+        gains = [0.0] * 10
+        gains[5] = 6.0
+        res = self.client.post(
+            "/api/streams/{}/adjust".format(self.station2_id),
+            json={"eq_gains": gains}).get_json()
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(res["mode"], "live")
+
+        host_port = manager.telnet_host_port()
+        self.assertIsNotNone(host_port, "telnet-порт воркера не опубликован")
+        # воркер печатает значение с точностью до 3 знаков: «6.000»
+        out = panel._telnet_command(host_port[0], host_port[1], "var.get panel_eq_1000")
+        self.assertAlmostEqual(float(out.strip().splitlines()[0].strip()), 6.0, places=2)
+
+        # Значения сохранились в реестре.
+        station = self.client.get("/api/streams/" + self.station2_id).get_json()["station"]
+        self.assertTrue(station["equalizer"]["enabled"])
+        self.assertEqual(station["equalizer"]["gains"], gains)
+
+        # Поток не прервался: тело наращивается и остаётся ADTS.
+        before = len(bytes(self.icecast.bodies.get("/station-2", b"")))
+        body = self.wait_for_body("/station-2", before + 20000)
+        self.assertTrue(body.startswith(b"\xff\xf1") or body.startswith(b"\xff\xf9"))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

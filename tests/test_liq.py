@@ -78,10 +78,22 @@ class LiqGeneratorTest(unittest.TestCase):
         self.assertIn("mount=\"/radio7\"", script)
         self.assertIn("%fdkaac(channels=2, samplerate=44100, bitrate=128", script)
 
-    def test_zero_eq_bands_skipped(self):
+    def test_all_eq_bands_interactive(self):
         script = liq.generate_liq_script(make_cfg())
-        self.assertNotIn("g=0.0", script)
-        self.assertEqual(script.count("ffmpeg.filter.equalizer"), 3)
+        # все 10 полос — с интерактивным gain, включая нулевые
+        self.assertEqual(script.count("ffmpeg.filter.equalizer"), 10)
+        self.assertIn("g=panel_eq_31()", script)
+        self.assertIn("g=panel_eq_16000()", script)
+        # стартовые значения объявлены для всех полос
+        self.assertIn('panel_eq_31 = interactive.float("panel_eq_31", 3.0)', script)
+        self.assertIn('panel_eq_62 = interactive.float("panel_eq_62", 0.0)', script)
+        self.assertIn('panel_eq_1000 = interactive.float("panel_eq_1000", 0.0)', script)
+
+    def test_eq_disabled_has_no_interactive_bands(self):
+        cfg = make_cfg(equalizer={"enabled": False, "gains": [1] * 10})
+        script = liq.generate_liq_script(cfg)
+        self.assertNotIn("ffmpeg.filter.equalizer", script)
+        self.assertNotIn("panel_eq_", script)
 
     def test_bypass_has_no_filters(self):
         script = liq.generate_liq_script(make_cfg(bypass=True))
@@ -102,8 +114,9 @@ class LiqGeneratorTest(unittest.TestCase):
         script = liq.generate_liq_script(cfg)
         self.assertNotIn("ffmpeg.filter.create", script)
         self.assertNotIn("amplify", script)
-        # обработки нет — live-переключатель не нужен
+        # обработки нет — live-переключатель и полосы EQ не нужны
         self.assertNotIn("panel_bypass", script)
+        self.assertNotIn("panel_eq_", script)
         # интерактивная переменная всё равно регистрируется (стартовое 1.0)
         self.assertIn('interactive.float("panel_gain", 1.0)', script)
 

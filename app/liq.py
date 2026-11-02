@@ -14,6 +14,10 @@ EQ (10 полос) → усиление → компрессор → loudnorm (�
 Обработанный сигнал собирается в отдельную ветку proc, а выход воркера —
 switch на интерактивной переменной panel_bypass: панель переключает
 BYPASS работающего воркера живьём (telnet: var.set panel_bypass = true|false).
+
+Полосы EQ — тоже интерактивные переменные panel_eq_<частота>: любую полосу
+(в том числе с нуля) можно подстроить на работающем воркере
+(telnet: var.set panel_eq_1000 = 3.0).
 """
 
 EQ_FREQS = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]
@@ -48,20 +52,38 @@ def _liq_string(text):
     return str(text).replace("\\", "\\\\").replace('"', '\\"')
 
 
+def eq_var_name(freq):
+    """Имя интерактивной переменной полосы EQ (telnet: var.set panel_eq_<f>)."""
+    return "panel_eq_{}".format(int(freq))
+
+
 def _eq_calls(cfg):
     eq = cfg.get("equalizer", {})
     if not eq.get("enabled"):
         return []
+    # Все 10 полос — с интерактивным gain: панель подстраивает любую полосу
+    # (в т.ч. с нуля) живьём. Нулевая полоса — фильтр-пропускание, как и раньше.
     calls = []
-    for freq, gain in zip(EQ_FREQS, eq.get("gains", [])):
-        if abs(float(gain)) <= 0.01:
-            continue  # нулевые полосы не плодим, как и в FFmpeg-цепочке
+    for freq in EQ_FREQS:
         calls.append(
-            "ffmpeg.filter.equalizer(f={f}, t={t}, w=1., g={g}, graph, ".format(
-                f=_f(freq), t=EQ_WIDTH_TYPE_OCTAVE, g=_f(gain)
+            "ffmpeg.filter.equalizer(f={f}, t={t}, w=1., g={g}(), graph, ".format(
+                f=_f(freq), t=EQ_WIDTH_TYPE_OCTAVE, g=eq_var_name(freq)
             )
         )
     return calls
+
+
+def _eq_interactive_vars(cfg):
+    """Объявления panel_eq_<f> со стартовыми gains из конфигурации."""
+    eq = cfg.get("equalizer", {})
+    if not eq.get("enabled"):
+        return None
+    lines = ["# Полосы EQ (10) — живьём по telnet «var.set panel_eq_<f> = <дБ>»"]
+    for freq, gain in zip(EQ_FREQS, eq.get("gains", [])):
+        gain = max(-12.0, min(12.0, float(gain)))
+        lines.append('{name} = interactive.float("{name}", {v})'.format(
+            name=eq_var_name(freq), v=_f(gain)))
+    return "\n".join(lines)
 
 
 def _compressor_call(cfg):
@@ -273,6 +295,10 @@ def generate_liq_script(cfg):
         'panel_gain = interactive.float("panel_gain", {v})'.format(v=_f(gain_linear)),
         "",
     ]
+
+    eq_vars = _eq_interactive_vars(cfg)
+    if eq_vars:
+        parts += [eq_vars, ""]
 
     if block:
         parts.append(block)

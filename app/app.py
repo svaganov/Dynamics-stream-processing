@@ -859,13 +859,20 @@ class ProcessManager:
                 time.sleep(5)
 
 
-def _telnet_command(host, port, command, timeout=4.0):
-    """Одна команда сервера управления Liquidsoap (telnet-протокол).
+def _fmt_telnet_float(value):
+    """Float в виде, который однозначно парсится как float на стороне Liquidsoap."""
+    text = "{:.6f}".format(float(value)).rstrip("0").rstrip(".")
+    return text if "." in text else text + ".0"
+
+
+def _telnet_session(host, port, commands, timeout=4.0):
+    """Несколько команд в одном telnet-подключении к серверу Liquidsoap.
 
     Ответы сервера заканчиваются строкой END; служебные IAC-последовательности
-    telnet вырезаются. Возвращает текст ответа."""
+    telnet вырезаются. Возвращает список текстов ответов (по одному на команду)."""
     import socket
     sock = socket.create_connection((host, int(port)), timeout=timeout)
+    outputs = []
     try:
         sock.settimeout(0.5)
         try:
@@ -873,16 +880,23 @@ def _telnet_command(host, port, command, timeout=4.0):
         except socket.timeout:
             pass
         sock.settimeout(timeout)
-        sock.sendall(command.encode("utf-8") + b"\r\n")
-        buf = b""
-        while b"END" not in buf:
-            chunk = sock.recv(4096)
-            if not chunk:
-                break
-            buf += chunk
+        for command in commands:
+            sock.sendall(command.encode("utf-8") + b"\r\n")
+            buf = b""
+            while b"END" not in buf:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+            outputs.append(re.sub(rb"\xff...", b"", buf).decode("utf-8", "replace"))
     finally:
         sock.close()
-    return re.sub(rb"\xff...", b"", buf).decode("utf-8", "replace")
+    return outputs
+
+
+def _telnet_command(host, port, command, timeout=4.0):
+    """Одна команда сервера управления Liquidsoap (telnet-протокол)."""
+    return _telnet_session(host, port, [command], timeout=timeout)[0]
 
 
 class DockerWorkerManager:
@@ -1084,6 +1098,37 @@ class DockerWorkerManager:
         if lines and "error" in lines[0].lower():
             return False, lines[0]
         return True, "подстроено живьём: {:+g} дБ".format(db)
+
+    def _telnet_check(self, outputs):
+        """Первая строка ответа с «error» — повод считать команду неудавшейся."""
+        for out in outputs:
+            lines = out.strip().splitlines()
+            if lines and "error" in lines[0].lower():
+                return lines[0]
+        return None
+
+    def adjust_eq(self, gains):
+        """Живая подстройка 10 полос EQ через telnet (без перезапуска)."""
+        gains = [max(-12.0, min(12.0, float(g))) for g in gains]
+        with self.lock:
+            container = self.container
+        if container is None or not self._is_running(container):
+            return False, "воркер не запущен"
+        host_port = self.telnet_host_port()
+        if host_port is None:
+            return False, "telnet-порт воркера недоступен (удалённый демон Docker?)"
+        commands = [
+            "var.set {name} = {v}".format(name=liq.eq_var_name(freq), v=_fmt_telnet_float(g))
+            for freq, g in zip(liq.EQ_FREQS, gains)
+        ]
+        try:
+            outputs = _telnet_session(host_port[0], host_port[1], commands)
+        except Exception as exc:
+            return False, "telnet: {}".format(exc)
+        err = self._telnet_check(outputs)
+        if err:
+            return False, err
+        return True, "EQ подстроен живьём (10 полос)"
 
     def set_bypass(self, enabled):
         """Живое переключение BYPASS воркера через telnet (без перезапуска)."""
@@ -1463,28 +1508,62 @@ def api_station_command(station_id):
 
 @app.route("/api/streams/<station_id>/adjust", methods=["POST"])
 def api_station_adjust(station_id):
-    """Живая подстройка работающего воркера (пока — усиления, без перезапуска)."""
+    """Живая подстройка работающего воркера: gain_db и/или eq_gains (без перезапуска)."""
     station = get_station(station_id)
     if station is None:
         return _station_not_found()
     body = request.get_json(silent=True) or {}
-    if "gain_db" not in body:
-        return jsonify({"ok": False, "error": "укажите gain_db"}), 400
-    try:
-        gain_db = float(body["gain_db"])
-    except (TypeError, ValueError):
-        return jsonify({"ok": False, "error": "gain_db должен быть числом"}), 400
+    gain_db = None
+    eq_gains = None
+    if "gain_db" in body:
+        try:
+            gain_db = float(body["gain_db"])
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "gain_db должен быть числом"}), 400
+    if "eq_gains" in body:
+        raw = body["eq_gains"]
+        if (not isinstance(raw, list)) or len(raw) != len(liq.EQ_FREQS):
+            return jsonify({
+                "ok": False,
+                "error": "eq_gains должен быть списком из {} чисел".format(len(liq.EQ_FREQS)),
+            }), 400
+        try:
+            eq_gains = [float(g) for g in raw]
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "eq_gains должен быть списком чисел"}), 400
+    if gain_db is None and eq_gains is None:
+        return jsonify({"ok": False, "error": "укажите gain_db и/или eq_gains"}), 400
     if station.get("engine") != "liquidsoap":
         return jsonify({
             "ok": False,
             "error": "живая подстройка доступна только для движка Liquidsoap — "
                      "для FFmpeg изменения применяются при перезапуске",
         }), 409
-    ok, msg = get_manager(station_id).adjust_gain(gain_db)
-    if not ok:
-        return jsonify({"ok": False, "error": msg}), 409
-    updated = update_station(station_id, {"gain": {"enabled": True, "db": gain_db}})
-    return jsonify({"ok": True, "mode": "live", "message": msg, "gain": updated["gain"]})
+    manager = get_manager(station_id)
+    message = []
+    if gain_db is not None:
+        ok, msg = manager.adjust_gain(gain_db)
+        if not ok:
+            return jsonify({"ok": False, "error": msg}), 409
+        message.append(msg)
+    if eq_gains is not None:
+        ok, msg = manager.adjust_eq(eq_gains)
+        if not ok:
+            return jsonify({"ok": False, "error": msg}), 409
+        message.append(msg)
+    patch = {}
+    if gain_db is not None:
+        patch["gain"] = {"enabled": True, "db": gain_db}
+    if eq_gains is not None:
+        patch["equalizer"] = {"enabled": True, "gains": eq_gains}
+    updated = update_station(station_id, patch)
+    return jsonify({
+        "ok": True,
+        "mode": "live",
+        "message": "; ".join(message),
+        "gain": updated.get("gain"),
+        "equalizer": updated.get("equalizer"),
+    })
 
 
 @app.route("/api/streams/<station_id>/bypass", methods=["POST"])

@@ -325,6 +325,47 @@ class PanelApiTest(unittest.TestCase):
         station = self.client.get("/api/streams/" + station_id).get_json()["station"]
         self.assertFalse(station["bypass"])
 
+    def test_adjust_requires_any_parameter(self):
+        res = self.client.post("/api/streams/station-1/adjust", json={})
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("gain_db и/или eq_gains", res.get_json()["error"])
+
+    def test_adjust_eq_validation(self):
+        station_id, _ = self._make_running_liquidsoap_station()
+        res = self.client.post(
+            "/api/streams/{}/adjust".format(station_id), json={"eq_gains": [1, 2, 3]})
+        self.assertEqual(res.status_code, 400)
+        res = self.client.post(
+            "/api/streams/{}/adjust".format(station_id),
+            json={"eq_gains": ["a"] * 10})
+        self.assertEqual(res.status_code, 400)
+
+    def test_adjust_eq_rejected_for_ffmpeg_engine(self):
+        res = self.client.post(
+            "/api/streams/station-1/adjust",
+            json={"eq_gains": [0.0] * 10})
+        self.assertEqual(res.status_code, 409)
+
+    def test_adjust_eq_sends_telnet_session_and_persists(self):
+        station_id, _ = self._make_running_liquidsoap_station()
+        gains = [0.0] * 10
+        gains[2] = 6.0   # 125 Гц
+        gains[9] = -1.5  # 16 кГц
+        with mock.patch.object(panel, "_telnet_session",
+                               return_value=["OK\nEND"] * 10) as sess:
+            res = self.client.post(
+                "/api/streams/{}/adjust".format(station_id), json={"eq_gains": gains})
+        self.assertEqual(res.status_code, 200)
+        data = res.get_json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["mode"], "live")
+        self.assertEqual(len(sess.call_args[0][2]), 10)
+        self.assertEqual(sess.call_args[0][2][2], "var.set panel_eq_125 = 6.0")
+        self.assertEqual(sess.call_args[0][2][9], "var.set panel_eq_16000 = -1.5")
+        station = self.client.get("/api/streams/" + station_id).get_json()["station"]
+        self.assertTrue(station["equalizer"]["enabled"])
+        self.assertEqual(station["equalizer"]["gains"], gains)
+
     def test_process_isolation_and_autorestart(self):
         res = self.client.post("/api/streams", json={"name": "Радио 2"})
         station2_id = res.get_json()["station"]["id"]

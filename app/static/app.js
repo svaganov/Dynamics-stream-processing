@@ -61,6 +61,38 @@ const EQ_PRESETS = {
   bright: [-1, -1, 0, 0, 0, 0, 1, 3, 5, 5],
 };
 
+function currentEqGains() {
+  return EQ_FREQS.map((_, i) => parseFloat($("eq_b" + i).value));
+}
+
+/* Живое применение EQ: для работающей Liquidsoap-станции отпускание слайдера,
+   пресет, сброс и включение EQ шлют все 10 полос воркеру по telnet. */
+async function applyEqLive() {
+  if (!currentStationId) return false;
+  if ($("engine").value !== "liquidsoap" || !currentRunning) return false;
+  if (!$("eq_enabled").checked) return false;
+  const gains = currentEqGains();
+  try {
+    const res = await fetch("/api/streams/" + encodeURIComponent(currentStationId) + "/adjust", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ eq_gains: gains }),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      toast(data.error || "Не удалось применить EQ", true);
+      return false;
+    }
+    const st = streamsDoc.streams.find((s) => s.id === currentStationId);
+    if (st) st.equalizer = Object.assign({}, st.equalizer, { enabled: true, gains });
+    toast("EQ применён живьём");
+    return true;
+  } catch (e) {
+    toast("Не удалось применить EQ", true);
+    return false;
+  }
+}
+
 function buildEqBands() {
   const row = $("eqRow");
   EQ_FREQS.forEach((freq, i) => {
@@ -80,7 +112,8 @@ function buildEqBands() {
     slider.min = -12; slider.max = 12; slider.step = 0.5; slider.value = 0;
     slider.setAttribute("aria-label", "Полоса " + EQ_LABELS[i] + " Гц");
     slider.addEventListener("input", () => { syncEqLabels(); refreshCommand(); });
-    slider.addEventListener("dblclick", () => { slider.value = 0; syncEqLabels(); refreshCommand(); });
+    slider.addEventListener("change", () => { applyEqLive(); });
+    slider.addEventListener("dblclick", () => { slider.value = 0; syncEqLabels(); refreshCommand(); applyEqLive(); });
     const zero = document.createElement("div");
     zero.className = "eq-zero";
     sliderWrap.appendChild(slider);
@@ -118,13 +151,17 @@ $("eq_preset").addEventListener("change", (e) => {
     applyEqPreset(e.target.value);
     $("eq_enabled").checked = true;
     syncCardState();
+    applyEqLive();
   }
 });
 
 $("btnEqReset").addEventListener("click", () => {
   applyEqPreset("flat");
   $("eq_preset").value = "";
+  applyEqLive();
 });
+
+$("eq_enabled").addEventListener("change", () => { applyEqLive(); });
 
 /* ---------- config <-> form ---------- */
 
