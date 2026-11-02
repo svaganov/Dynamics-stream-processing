@@ -49,10 +49,10 @@ class LiqGeneratorTest(unittest.TestCase):
         # 2.5 дБ -> линейное усиление 10 ** (2.5/20) = 1.333521
         self.assertIn('panel_gain = interactive.float("panel_gain", 1.333521)', script)
         # порядок: EQ-граф (raw) → amplify (PCM) → граф динамики (raw);
-        # у каждого графа своя пара encode/decode
+        # у каждого графа своя пара encode/decode; ветка proc, выход — switch
         pos_raw = script.index("ffmpeg.raw.encode.audio")
         pos_eq = script.index("ffmpeg.filter.equalizer(f=31")
-        pos_amp = script.index("s = amplify(panel_gain(), s)")
+        pos_amp = script.index("proc = amplify(panel_gain(), proc)")
         pos_comp = script.index("ffmpeg.filter.acompressor")
         pos_dec = script.rindex("ffmpeg.raw.decode.audio")
         self.assertEqual(script.count("ffmpeg.raw.encode.audio"), 2)
@@ -61,6 +61,12 @@ class LiqGeneratorTest(unittest.TestCase):
         self.assertLess(pos_eq, pos_amp)
         self.assertLess(pos_amp, pos_comp)
         self.assertLess(pos_comp, pos_dec)
+        # live-BYPASS: интерактивная переменная + switch «вход ↔ обработка»
+        self.assertIn('panel_bypass = interactive.bool("panel_bypass", false)', script)
+        pos_switch = script.index("s = switch(track_sensitive=false, [")
+        self.assertLess(pos_dec, pos_switch)
+        self.assertIn("(panel_bypass, s)", script)
+        self.assertIn("({not panel_bypass()}, buffer(proc))", script)
         # пороги/makeup переведены из dB в линейные
         self.assertIn("threshold=0.1", script)
         self.assertIn("makeup=1.995262", script)
@@ -82,6 +88,9 @@ class LiqGeneratorTest(unittest.TestCase):
         self.assertNotIn("ffmpeg.filter", script)
         self.assertNotIn("ffmpeg.raw", script)
         self.assertNotIn("amplify", script)
+        # статический BYPASS — без ветки proc и без live-переключателя
+        self.assertNotIn("panel_bypass", script)
+        self.assertNotIn("switch(", script)
         self.assertIn("output.icecast", script)
 
     def test_all_disabled_equals_no_filter_block(self):
@@ -93,6 +102,8 @@ class LiqGeneratorTest(unittest.TestCase):
         script = liq.generate_liq_script(cfg)
         self.assertNotIn("ffmpeg.filter.create", script)
         self.assertNotIn("amplify", script)
+        # обработки нет — live-переключатель не нужен
+        self.assertNotIn("panel_bypass", script)
         # интерактивная переменная всё равно регистрируется (стартовое 1.0)
         self.assertIn('interactive.float("panel_gain", 1.0)', script)
 
@@ -102,9 +113,12 @@ class LiqGeneratorTest(unittest.TestCase):
                        loudnorm={"enabled": False},
                        limiter={"enabled": False})
         script = liq.generate_liq_script(cfg)
-        self.assertIn("s = amplify(panel_gain(), s)", script)
+        self.assertIn("proc = amplify(panel_gain(), s)", script)
         self.assertNotIn("ffmpeg.filter.create", script)
         self.assertNotIn("ffmpeg.raw", script)
+        # даже одиночное усиление оборачивается live-BYPASS
+        self.assertIn('panel_bypass = interactive.bool("panel_bypass", false)', script)
+        self.assertIn("({not panel_bypass()}, buffer(proc))", script)
 
     def test_disabled_gain_initializes_panel_gain_to_one(self):
         cfg = make_cfg(gain={"enabled": True, "db": 0})

@@ -1085,6 +1085,28 @@ class DockerWorkerManager:
             return False, lines[0]
         return True, "подстроено живьём: {:+g} дБ".format(db)
 
+    def set_bypass(self, enabled):
+        """Живое переключение BYPASS воркера через telnet (без перезапуска)."""
+        enabled = bool(enabled)
+        with self.lock:
+            container = self.container
+        if container is None or not self._is_running(container):
+            return False, "воркер не запущен"
+        host_port = self.telnet_host_port()
+        if host_port is None:
+            return False, "telnet-порт воркера недоступен (удалённый демон Docker?)"
+        value = "true" if enabled else "false"
+        try:
+            out = _telnet_command(host_port[0], host_port[1],
+                                  "var.set panel_bypass = " + value)
+        except Exception as exc:
+            return False, "telnet: {}".format(exc)
+        lines = out.strip().splitlines()
+        if lines and "error" in lines[0].lower():
+            return False, lines[0]
+        return True, ("BYPASS включён живьём" if enabled
+                      else "BYPASS снят живьём")
+
     def dispose(self):
         """Остановка + удаление контейнера (при смене движка или удалении станции)."""
         self.stop()
@@ -1463,6 +1485,28 @@ def api_station_adjust(station_id):
         return jsonify({"ok": False, "error": msg}), 409
     updated = update_station(station_id, {"gain": {"enabled": True, "db": gain_db}})
     return jsonify({"ok": True, "mode": "live", "message": msg, "gain": updated["gain"]})
+
+
+@app.route("/api/streams/<station_id>/bypass", methods=["POST"])
+def api_station_bypass(station_id):
+    """Живое переключение BYPASS работающего воркера (без перезапуска)."""
+    station = get_station(station_id)
+    if station is None:
+        return _station_not_found()
+    body = request.get_json(silent=True) or {}
+    enabled = bool(body.get("enabled"))
+    if station.get("engine") != "liquidsoap":
+        return jsonify({
+            "ok": False,
+            "error": "живой BYPASS доступен только для движка Liquidsoap — "
+                     "для FFmpeg он применяется при перезапуске",
+        }), 409
+    ok, msg = get_manager(station_id).set_bypass(enabled)
+    if not ok:
+        return jsonify({"ok": False, "error": msg}), 409
+    updated = update_station(station_id, {"bypass": enabled})
+    return jsonify({"ok": True, "mode": "live", "message": msg,
+                    "bypass": updated["bypass"]})
 
 
 @app.route("/api/health", methods=["GET"])

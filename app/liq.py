@@ -10,6 +10,10 @@ EQ (10 полос) → усиление → компрессор → loudnorm (�
 Усиление вынесено из ffmpeg-графа в amplify(panel_gain(), s): panel_gain —
 интерактивная переменная, поэтому панель может подстраивать громкость
 работающего воркера без перезапуска (telnet: var.set panel_gain = <линейн.>).
+
+Обработанный сигнал собирается в отдельную ветку proc, а выход воркера —
+switch на интерактивной переменной panel_bypass: панель переключает
+BYPASS работающего воркера живьём (telnet: var.set panel_bypass = true|false).
 """
 
 EQ_FREQS = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]
@@ -96,7 +100,7 @@ def _limiter_call(cfg):
     )
 
 
-def _graph_block(fn_name, title, calls):
+def _graph_block(fn_name, title, calls, src="s", dst="proc"):
     """Блок ffmpeg.filter.create из вложенных вызовов фильтров.
 
     let-переменные Liquidsoap неизменяемы, поэтому цепочка — matryoshka
@@ -109,18 +113,18 @@ def _graph_block(fn_name, title, calls):
     lines = [
         "# --- {title} ---".format(title=title),
         "def {fn}(graph) =".format(fn=fn_name),
-        "  let {audio = a_in} = source.tracks(s)",
+        "  let {{audio = a_in}} = source.tracks({src})".format(src=src),
         "  a_in = ffmpeg.filter.audio.input(graph, a_in)",
         "  a_in = " + expr,
         "  a_in = ffmpeg.filter.audio.output(graph, a_in)",
         "  source({audio = a_in, metadata = track.metadata(a_in), track_marks = track.track_marks(a_in)})",
         "end",
-        "s = ffmpeg.filter.create({fn})".format(fn=fn_name),
+        "{dst} = ffmpeg.filter.create({fn})".format(dst=dst, fn=fn_name),
     ]
     return "\n".join(lines)
 
 
-def _gain_block(cfg):
+def _gain_block(cfg, src="proc", dst="proc"):
     """Статическое усиление через amplify с интерактивной переменной panel_gain.
 
     В отличие от ffmpeg-графа, значение amplify меняется живьём: панель шлёт
@@ -132,49 +136,82 @@ def _gain_block(cfg):
     if abs(db) <= 0.01:
         return None
     return (
-        "# --- усиление: amplify(panel_gain(), s) — живьём через telnet ---\n"
-        "s = amplify(panel_gain(), s)"
+        "# --- усиление: amplify(panel_gain(), {src}) — живьём через telnet ---\n"
+        "{dst} = amplify(panel_gain(), {src})".format(src=src, dst=dst)
+    )
+
+
+def _live_bypass_block():
+    """Переключатель «чистый вход ↔ обработка» на интерактивной переменной.
+
+    Панель шлёт по telnet «var.set panel_bypass = true|false» — воркер
+    переключает ветку без перезапуска. buffer(proc) разводит clock-контекст:
+    ffmpeg-графы живут в собственном вложенном clock, switch требует единый."""
+    return (
+        "# Live BYPASS: «var.set panel_bypass = true|false» по telnet — без перезапуска\n"
+        'panel_bypass = interactive.bool("panel_bypass", false)\n'
+        "s = switch(track_sensitive=false, [\n"
+        "  (panel_bypass, s),\n"
+        "  ({not panel_bypass()}, buffer(proc))\n"
+        "])"
     )
 
 
 def _processing_block(cfg):
-    """Возвращает блок обработки (строка) или None для BYPASS/пустой цепочки."""
+    """Блок обработки + live-BYPASS, или None для статического BYPASS.
+
+    Статический bypass (cfg["bypass"]) — ветки обработки в скрипте нет совсем.
+    Иначе обработка собирается в переменную proc, а выход — switch на
+    интерактивной переменной panel_bypass (панель переключает живьём)."""
     if cfg.get("bypass"):
         return None
 
-    eq_block = _graph_block("eq_mkfilter", "EQ (10 полос)", _eq_calls(cfg))
+    eq_calls = _eq_calls(cfg)
     gain_block = _gain_block(cfg)
     dyn_calls = []
     for stage in (_compressor_call(cfg), _loudnorm_call(cfg), _limiter_call(cfg)):
         if stage:
             dyn_calls.append(stage)
-    dyn_block = _graph_block("dyn_mkfilter", "компрессор → loudnorm → лимитер", dyn_calls)
 
-    if not (eq_block or gain_block or dyn_block):
-        return None  # всё выключено — декод/код без фильтров
+    if not (eq_calls or gain_block or dyn_calls):
+        return None  # всё выключено — декод/код без фильтров, live-BYPASS не нужен
 
     parts = [
-        "# --- цепочка обработки: EQ → усиление (живьём) → компрессор → loudnorm → лимитер ---"
+        "# --- цепочка обработки (ветка proc, live-BYPASS через panel_bypass): "
+        "EQ → усиление → компрессор → loudnorm → лимитер ---",
     ]
 
-    def _raw_wrapped(graph_block, comment):
+    def _raw_wrapped(graph_block, comment, src, dst):
         # ffmpeg-фильтры работают поверх raw-формата: encode → граф → decode.
         # Каждый граф — со своей парой encode/decode: amplify требует PCM-источник
         # (raw-источник ему не подходит по типам), поэтому усиление живёт
         # в PCM-домене между двумя raw-графами.
         return "\n\n".join([
             "# raw-обёртка: {c}\n"
-            "s = ffmpeg.raw.encode.audio(%ffmpeg(%audio.raw), s)".format(c=comment),
+            "{dst} = ffmpeg.raw.encode.audio(%ffmpeg(%audio.raw), {src})".format(
+                c=comment, src=src, dst=dst),
             graph_block,
-            "s = ffmpeg.raw.decode.audio(s)",
+            "{dst} = ffmpeg.raw.decode.audio({src})".format(src=dst, dst=dst),
         ])
 
-    if eq_block:
-        parts.append(_raw_wrapped(eq_block, "EQ-граф"))
+    current = "s"
+    if eq_calls:
+        # encode пишет raw в proc — граф читает треки proc (raw), не current;
+        # после decode proc снова PCM.
+        eq_block = _graph_block("eq_mkfilter", "EQ (10 полос)", eq_calls,
+                                src="proc", dst="proc")
+        parts.append(_raw_wrapped(eq_block, "EQ-граф", current, "proc"))
+        current = "proc"
     if gain_block:
-        parts.append(gain_block)
-    if dyn_block:
-        parts.append(_raw_wrapped(dyn_block, "граф динамики"))
+        parts.append(_gain_block(cfg, src=current, dst="proc"))
+        current = "proc"
+    if dyn_calls:
+        dyn_block = _graph_block("dyn_mkfilter", "компрессор → loudnorm → лимитер",
+                                 dyn_calls, src="proc", dst="proc")
+        parts.append(_raw_wrapped(dyn_block, "граф динамики", current, "proc"))
+        current = "proc"
+
+    parts.append(_live_bypass_block())
     return "\n\n".join(parts)
 
 

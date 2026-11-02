@@ -97,13 +97,12 @@ docker compose up -d --build
 
 ```text
 input.http (max_buffer 10 c, reconnect)                       приём + декод
-  → ffmpeg.raw.encode.audio (%ffmpeg(%audio.raw))             обёртка в raw-граф
-  → ffmpeg.filter.equalizer  ×10 полос                        EQ
-  → amplify(panel_gain(), s) (опционально)                   усиление, live
-  → ffmpeg.filter.acompressor (linear threshold/makeup)       компрессор
-  → ffmpeg.filter.loudnorm (i/tp/lra, linear=false)           LUFS, динамический режим
-  → ffmpeg.filter.alimiter (linear ceiling)                   лимитер
-  → ffmpeg.raw.decode.audio                                   обратно в трек
+  ├─ (ветка proc) ffmpeg.raw.encode.audio                     обёртка EQ-графа
+  │   → ffmpeg.filter.equalizer ×10 полос                     EQ
+  │   → ffmpeg.raw.decode.audio                               обратно в PCM
+  │   → amplify(panel_gain(), proc) (опционально)             усиление, live
+  │   → ffmpeg.raw.encode.audio → граф динамики → decode      компрессор → loudnorm → лимитер
+  └─ switch(track_sensitive=false, panel_bypass)              live-BYPASS: вход ↔ обработка
   → output.icecast (fallible=true)                            FDK-AAC → ADTS → Icecast
 ```
 
@@ -125,26 +124,36 @@ input.http (max_buffer 10 c, reconnect)                       приём + де�
 Liquidsoap: `settings.server.telnet` на порту 1234, публикуется на хосте строго
 на `127.0.0.1` со случайным портом (панель находит его через Docker API).
 
-## Живая подстройка усиления (Liquidsoap, без перезапуска)
+## Живое управление работающим воркером (Liquidsoap, без перезапуска)
 
 В сгенерированном скрипте усиление — интерактивная переменная
 `panel_gain = interactive.float("panel_gain", <линейное>)`, применяемая через
-`amplify(panel_gain(), s)` после EQ и до компрессора. Кнопка **«⚡ Живьём»**
-в карточке «02 Эквалайзер» шлёт:
+`amplify(panel_gain(), proc)` после EQ и до компрессора. Обработанный сигнал
+собирается в отдельную ветку `proc`, а выход воркера — `switch` на переменной
+`panel_bypass`: переключатель BYPASS в шапке панели работает живьём для
+запущенной Liquidsoap-станции. Кнопка **«⚡ Живьём»** в карточке «02 Эквалайзер»
+и переключатель BYPASS шлют:
 
 ```text
 POST /api/streams/<id>/adjust      {"gain_db": 3.0}
-  → 200 {"ok": true, "mode": "live", "gain": {"enabled": true, "db": 3.0}}
-  → 409 (движок FFmpeg / воркер не запущен / ошибка telnet), 400 (нет gain_db)
+POST /api/streams/<id>/bypass      {"enabled": true|false}
+  → 200 {"ok": true, "mode": "live", ...}
+  → 409 (движок FFmpeg / воркер не запущен / ошибка telnet)
+  → 400 (нет gain_db у /adjust)
 ```
 
 Панель переводит дБ в линейное (`10^(dB/20)`, диапазон ±24 дБ) и выполняет
-`var.set panel_gain = <линейное>` по telnet; значение одновременно сохраняется
-в `streams.json`, чтобы рестарт поднялся с ним. Ограничения:
+`var.set panel_gain = <линейное>` / `var.set panel_bypass = true|false` по
+telnet; значение одновременно сохраняется в `streams.json`, чтобы рестарт
+поднялся с ним. Ограничения:
 
 - только движок `liquidsoap`; для FFmpeg изменения применяются при перезапуске;
 - работает только при локальном демоне Docker: при `DOCKER_HOST` порт мапится
-  на удалённом хосте и живьём не достичь — API вернёт 409.
+  на удалённом хосте и живьём не достичь — API вернёт 409;
+- live-BYPASS появляется в скрипте, только если в цепочке есть хотя бы один
+  включённый этап обработки (иначе обход уже и так полный);
+- `buffer(proc)` во второй ветке switch разводит clock-контекст ffmpeg-графов
+  (иначе Liquidsoap падает с «Cannot unify two nested clocks»).
 
 ## Реестр станций
 
@@ -224,8 +233,8 @@ python tests\sandbox_liquidsoap.py     :: Этап 2: FFmpeg-станция + Li
   (`GET /admin/metadata?mount=…&mode=updinfo&song=…`), т.к. FFmpeg при выходе `-f adts`
   не вставляет динамические in-band метаданные. У Liquidsoap-воркеров метаданные идут
   сквозь конвейер автоматически и публикуются клиентом `output.icecast` самим сервером.
-- Telnet API воркера поднят: живая подстройка усиления работающего воркера
-  (`POST /api/streams/<id>/adjust`, кнопка «⚡ Живьём») — см. раздел выше.
+- Telnet API воркера поднят: живая подстройка усиления (`/adjust`, кнопка
+  «⚡ Живьём») и живой BYPASS (`/bypass`, переключатель в шапке) — см. раздел выше.
 - В песочнице Liquidsoap-потребление источника идёт быстрее realtime
   (авто-синхронизация под медленный источник не срабатывает) — компенсируется
   троттлингом источника в тесте. Против реального Icecast проверено не было.

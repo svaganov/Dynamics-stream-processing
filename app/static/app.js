@@ -627,6 +627,35 @@ $("btnGainLive").addEventListener("click", async () => {
   }
 });
 
+/* Живой BYPASS: для работающей Liquidsoap-станции переключатель шлёт
+   telnet-команду воркеру сразу; иначе значение применится при перезапуске. */
+$("bypass").addEventListener("change", async () => {
+  if (!currentStationId) return;
+  const enabled = $("bypass").checked;
+  if ($("engine").value !== "liquidsoap" || !currentRunning) return;
+  try {
+    const res = await fetch("/api/streams/" + encodeURIComponent(currentStationId) + "/bypass", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    });
+    const data = await res.json();
+    toast(data.ok ? data.message : (data.error || "Не удалось переключить"), !data.ok);
+    if (data.ok) {
+      const st = streamsDoc.streams.find((s) => s.id === currentStationId);
+      if (st) st.bypass = enabled;
+      syncChain();
+    } else {
+      $("bypass").checked = !enabled; // откат при неудаче
+      syncCardState();
+    }
+  } catch (e) {
+    $("bypass").checked = !enabled;
+    syncCardState();
+    toast("Не удалось переключить", true);
+  }
+});
+
 async function pollHealth() {
   try {
     lastHealth = await (await fetch("/api/health")).json();

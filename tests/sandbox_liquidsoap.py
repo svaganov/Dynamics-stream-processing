@@ -231,6 +231,43 @@ class LiquidsoapSandboxTest(unittest.TestCase):
         self.assertTrue(self.client.get(
             "/api/streams/" + self.station2_id + "/status").get_json()["running"])
 
+    def test_live_bypass_without_restart(self):
+        res = self.client.post("/api/streams/" + self.station2_id + "/start").get_json()
+        self.assertTrue(res["ok"], res)
+        self.wait_for_body("/station-2", 20000)
+
+        manager = panel.get_manager(self.station2_id)
+
+        # Включаем BYPASS живьём: поток идёт в обход обработки, без перезапуска.
+        res = self.client.post(
+            "/api/streams/{}/bypass".format(self.station2_id), json={"enabled": True}).get_json()
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(res["mode"], "live")
+        self.assertTrue(res["bypass"])
+
+        host_port = manager.telnet_host_port()
+        self.assertIsNotNone(host_port, "telnet-порт воркера не опубликован")
+        out = panel._telnet_command(host_port[0], host_port[1], "var.get panel_bypass")
+        self.assertEqual(out.strip().splitlines()[0].strip(), "true")
+
+        # Значение сохранилось в реестре — рестарт поднимется с ним.
+        station = self.client.get("/api/streams/" + self.station2_id).get_json()["station"]
+        self.assertTrue(station["bypass"])
+
+        # Поток не прервался: тело наращивается и остаётся ADTS.
+        before = len(bytes(self.icecast.bodies.get("/station-2", b"")))
+        body = self.wait_for_body("/station-2", before + 20000)
+        self.assertTrue(body.startswith(b"\xff\xf1") or body.startswith(b"\xff\xf9"))
+
+        # Снимаем BYPASS — снова живьём.
+        res = self.client.post(
+            "/api/streams/{}/bypass".format(self.station2_id), json={"enabled": False}).get_json()
+        self.assertTrue(res["ok"], res)
+        out = panel._telnet_command(host_port[0], host_port[1], "var.get panel_bypass")
+        self.assertEqual(out.strip().splitlines()[0].strip(), "false")
+        station = self.client.get("/api/streams/" + self.station2_id).get_json()["station"]
+        self.assertFalse(station["bypass"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

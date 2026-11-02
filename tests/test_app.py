@@ -270,6 +270,61 @@ class PanelApiTest(unittest.TestCase):
         self.assertEqual(res.status_code, 409)
         self.assertIn("error", res.get_json()["error"].lower())
 
+    def _make_running_liquidsoap_station(self):
+        res = self.client.post("/api/streams", json={"name": "Радио LQ", "engine": "liquidsoap"})
+        station_id = res.get_json()["station"]["id"]
+        manager = panel.get_manager(station_id)
+        manager.container = FakeLiquidsoapContainer()
+        return station_id, manager
+
+    def test_bypass_rejected_for_ffmpeg_engine(self):
+        res = self.client.post("/api/streams/station-1/bypass", json={"enabled": True})
+        self.assertEqual(res.status_code, 409)
+        self.assertIn("liquidsoap", res.get_json()["error"].lower())
+
+    def test_bypass_rejected_when_worker_not_running(self):
+        res = self.client.post("/api/streams", json={"name": "Радио LQ", "engine": "liquidsoap"})
+        station_id = res.get_json()["station"]["id"]
+        res = self.client.post("/api/streams/{}/bypass".format(station_id), json={"enabled": True})
+        self.assertEqual(res.status_code, 409)
+        self.assertIn("не запущен", res.get_json()["error"])
+
+    def test_bypass_sends_telnet_command_and_persists(self):
+        station_id, _ = self._make_running_liquidsoap_station()
+        with mock.patch.object(panel, "_telnet_command",
+                               return_value="Variable panel_bypass set.\nEND") as tel:
+            res = self.client.post(
+                "/api/streams/{}/bypass".format(station_id), json={"enabled": True})
+        self.assertEqual(res.status_code, 200)
+        data = res.get_json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["mode"], "live")
+        self.assertTrue(data["bypass"])
+        tel.assert_called_once_with("127.0.0.1", 55999, "var.set panel_bypass = true")
+        station = self.client.get("/api/streams/" + station_id).get_json()["station"]
+        self.assertTrue(station["bypass"])
+
+        # выключение шлёт false и тоже сохраняется
+        with mock.patch.object(panel, "_telnet_command",
+                               return_value="Variable panel_bypass set.\nEND") as tel:
+            res = self.client.post(
+                "/api/streams/{}/bypass".format(station_id), json={"enabled": False})
+        self.assertEqual(res.status_code, 200)
+        tel.assert_called_once_with("127.0.0.1", 55999, "var.set panel_bypass = false")
+        station = self.client.get("/api/streams/" + station_id).get_json()["station"]
+        self.assertFalse(station["bypass"])
+
+    def test_bypass_reports_telnet_error(self):
+        station_id, _ = self._make_running_liquidsoap_station()
+        with mock.patch.object(panel, "_telnet_command",
+                               return_value="Syntax error or variable not found.\nEND"):
+            res = self.client.post(
+                "/api/streams/{}/bypass".format(station_id), json={"enabled": True})
+        self.assertEqual(res.status_code, 409)
+        # значение не сохранилось
+        station = self.client.get("/api/streams/" + station_id).get_json()["station"]
+        self.assertFalse(station["bypass"])
+
     def test_process_isolation_and_autorestart(self):
         res = self.client.post("/api/streams", json={"name": "Радио 2"})
         station2_id = res.get_json()["station"]["id"]
