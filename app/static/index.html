@@ -1,0 +1,1245 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FFmpeg → Icecast · Панель управления</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0b1016;
+    --panel: #121922;
+    --panel-2: #17212d;
+    --border: #1f2a38;
+    --text: #dbe4ee;
+    --text-dim: #8494a7;
+    --accent: #43c6dd;
+    --green: #3ddc84;
+    --yellow: #ffd54a;
+    --orange: #ff9f2e;
+    --red: #ff5252;
+    --radius: 6px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+    font-size: 14px;
+    line-height: 1.55;
+    min-height: 100dvh;
+  }
+  ::selection { background: rgba(67, 198, 221, 0.25); }
+
+  /* ---------- header + nav tabs ---------- */
+  header {
+    position: sticky; top: 0; z-index: 10;
+    display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+    padding: 0 16px;
+    background: rgba(11, 16, 22, 0.96);
+    border-bottom: 1px solid var(--border);
+    min-height: 52px;
+  }
+  .logo {
+    display: flex; align-items: center; gap: 10px;
+    font-weight: 700; font-size: 14px; letter-spacing: 0.06em;
+    padding-right: 14px; margin-right: 4px;
+    border-right: 1px solid var(--border);
+    align-self: stretch;
+  }
+  .logo .arrow { color: var(--accent); }
+
+  .nav-tabs { display: flex; align-items: stretch; align-self: stretch; }
+  .nav-tab {
+    font: inherit; font-size: 12px; font-weight: 500;
+    letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--text-dim);
+    background: none; border: none; cursor: pointer;
+    padding: 0 16px;
+    border-bottom: 2px solid transparent;
+    transition: color 0.15s ease, border-color 0.15s ease;
+  }
+  .nav-tab:hover { color: var(--text); }
+  .nav-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .nav-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+  header .spacer { flex: 1; }
+
+  /* ---------- bypass ---------- */
+  .bypass-toggle {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-size: 11px; font-weight: 700; letter-spacing: 0.16em;
+    color: var(--text-dim); cursor: pointer; user-select: none;
+    padding: 5px 10px; border-radius: var(--radius); border: 1px solid var(--border);
+    transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+  }
+  .bypass-toggle.on {
+    color: var(--yellow); border-color: rgba(255, 213, 74, 0.55);
+    background: rgba(255, 213, 74, 0.07);
+  }
+  .bypass-toggle.on .track { background: rgba(255, 213, 74, 0.15) !important; border-color: rgba(255, 213, 74, 0.55) !important; }
+  .bypass-toggle.on .track::after { background: var(--yellow) !important; }
+
+  /* ---------- buttons ---------- */
+  .btn {
+    font: inherit; font-size: 12px; font-weight: 500;
+    letter-spacing: 0.08em;
+    padding: 7px 15px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--panel-2);
+    color: var(--text);
+    cursor: pointer;
+    transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease, transform 0.1s ease;
+  }
+  .btn:hover { border-color: var(--accent); color: var(--accent); }
+  .btn:active { transform: translateY(1px); }
+  .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn:disabled:hover { border-color: var(--border); color: var(--text); }
+  .btn.primary {
+    background: rgba(61, 220, 132, 0.12);
+    border-color: rgba(61, 220, 132, 0.5);
+    color: var(--green);
+  }
+  .btn.primary:hover { background: rgba(61, 220, 132, 0.2); border-color: var(--green); color: var(--green); }
+  .btn.danger:hover { border-color: var(--red); color: var(--red); }
+  header .btn { margin: 8px 0; }
+
+  /* ---------- layout: center + right ---------- */
+  .layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 300px;
+    gap: 16px;
+    max-width: 1560px; margin: 0 auto;
+    padding: 16px;
+  }
+  @media (max-width: 1150px) {
+    .layout { grid-template-columns: 1fr; }
+  }
+
+  .tab-page { display: none; }
+  .tab-page.active {
+    display: grid;
+    grid-template-columns: repeat(12, 1fr);
+    gap: 14px;
+    align-content: start;
+  }
+
+  section.card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 16px 16px;
+    grid-column: span 12;
+    min-width: 0;
+  }
+  section.card.disabled > .fields { opacity: 0.35; pointer-events: none; }
+  .eq-wrap.disabled { opacity: 0.35; pointer-events: none; }
+  @media (min-width: 900px) {
+    .card.s4 { grid-column: span 4; }
+    .card.s6 { grid-column: span 6; }
+    .card.s8 { grid-column: span 8; }
+    .card.s12 { grid-column: span 12; }
+  }
+
+  .card-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    margin: -14px -16px 14px; padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(255, 255, 255, 0.015);
+  }
+  .card-head h2 {
+    margin: 0;
+    font-size: 11px; font-weight: 700;
+    letter-spacing: 0.2em; text-transform: uppercase;
+    color: var(--accent);
+  }
+  .card-head h2 .idx { color: var(--text-dim); margin-right: 8px; }
+  .card-head .tools { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+  /* ---------- right panel (stream info) ---------- */
+  .right-panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0 0 8px;
+    align-self: start;
+    position: sticky; top: 68px;
+  }
+  .rp-title {
+    padding: 10px 16px;
+    font-size: 11px; font-weight: 700; letter-spacing: 0.2em; text-transform: uppercase;
+    color: var(--accent);
+    border-bottom: 1px solid var(--border);
+  }
+  .rp-status {
+    margin: 14px 16px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    display: flex; align-items: center; gap: 10px;
+    font-size: 12px; font-weight: 700; letter-spacing: 0.14em;
+    color: var(--text-dim);
+  }
+  .rp-status .dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--text-dim); flex: none;
+  }
+  .rp-status.running { color: var(--green); border-color: rgba(61, 220, 132, 0.45); background: rgba(61, 220, 132, 0.06); }
+  .rp-status.running .dot { background: var(--green); animation: pulse 1.5s ease-in-out infinite; }
+  @keyframes pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(61, 220, 132, 0.5); }
+    50% { box-shadow: 0 0 0 6px rgba(61, 220, 132, 0); }
+  }
+  .rp-row {
+    display: flex; justify-content: space-between; gap: 10px;
+    padding: 7px 16px;
+    border-bottom: 1px solid rgba(31, 42, 56, 0.6);
+    font-size: 12px;
+  }
+  .rp-row .k { color: var(--text-dim); letter-spacing: 0.08em; text-transform: uppercase; font-size: 10.5px; flex: none; }
+  .rp-row .v { text-align: right; word-break: break-all; min-width: 0; }
+  .rp-row .v.mono { font-size: 11.5px; color: var(--text); }
+  .rp-section-label {
+    padding: 12px 16px 4px;
+    font-size: 10.5px; color: var(--text-dim); letter-spacing: 0.16em; text-transform: uppercase;
+  }
+  .rp-chain { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 16px 10px; }
+  .chip {
+    font-size: 10.5px; font-weight: 700; letter-spacing: 0.1em;
+    padding: 3px 8px; border-radius: 4px;
+    border: 1px solid var(--border); color: var(--text-dim);
+    background: var(--panel-2);
+  }
+  .chip.on { color: var(--accent); border-color: rgba(67, 198, 221, 0.5); background: rgba(67, 198, 221, 0.08); }
+  .chip.bypass { color: var(--yellow); border-color: rgba(255, 213, 74, 0.55); background: rgba(255, 213, 74, 0.07); }
+  .rp-chain .arr { color: var(--text-dim); font-size: 10px; }
+
+  /* ---------- toggle switch ---------- */
+  .switch { position: relative; display: inline-block; width: 36px; height: 20px; flex: none; }
+  .switch input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
+  .switch .track {
+    position: absolute; inset: 0; border-radius: 999px;
+    background: var(--panel-2); border: 1px solid var(--border);
+    transition: background 0.15s ease, border-color 0.15s ease;
+    pointer-events: none;
+  }
+  .switch .track::after {
+    content: ""; position: absolute; top: 2px; left: 2px;
+    width: 14px; height: 14px; border-radius: 50%;
+    background: var(--text-dim);
+    transition: transform 0.15s ease, background 0.15s ease;
+  }
+  .switch input:checked + .track { background: rgba(67, 198, 221, 0.15); border-color: rgba(67, 198, 221, 0.55); }
+  .switch input:checked + .track::after { transform: translateX(16px); background: var(--accent); }
+  .switch input:focus-visible + .track { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* ---------- fields ---------- */
+  .field { margin-bottom: 12px; }
+  .field:last-child { margin-bottom: 0; }
+  .field label {
+    display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+    font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--text-dim);
+    margin-bottom: 5px;
+  }
+  .field label .val { color: var(--accent); font-weight: 500; letter-spacing: 0.02em; text-transform: none; }
+  .field .hint { font-size: 11px; color: var(--text-dim); margin-top: 4px; }
+
+  input[type="text"], input[type="password"], input[type="number"], select {
+    width: 100%;
+    font: inherit; font-size: 13px;
+    color: var(--text);
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 7px 10px;
+    transition: border-color 0.15s ease;
+  }
+  input:focus, select:focus { outline: none; border-color: var(--accent); }
+  input:focus-visible, select:focus-visible { outline: 2px solid rgba(67, 198, 221, 0.4); outline-offset: 1px; }
+  select { width: auto; max-width: 100%; }
+
+  input[type="range"] {
+    width: 100%; height: 22px; margin: 0;
+    appearance: none; -webkit-appearance: none;
+    background: transparent; cursor: pointer;
+  }
+  input[type="range"]::-webkit-slider-runnable-track {
+    height: 4px; border-radius: 2px; background: var(--border);
+  }
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none;
+    width: 14px; height: 14px; border-radius: 50%;
+    background: var(--accent); margin-top: -5px;
+    border: none;
+  }
+  input[type="range"]::-moz-range-track { height: 4px; border-radius: 2px; background: var(--border); }
+  input[type="range"]::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; background: var(--accent); border: none; }
+  input[type="range"]:focus-visible { outline: 2px solid rgba(67, 198, 221, 0.4); outline-offset: 4px; border-radius: 4px; }
+
+  /* риски шкалы — фирменный признак приборов анализатора */
+  .ticks {
+    height: 5px; margin-top: 1px;
+    background: repeating-linear-gradient(90deg, var(--border) 0 1px, transparent 1px calc(10% - 0.1px));
+    opacity: 0.9;
+  }
+
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .checkline { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+  .checkline .grow { flex: 1; }
+
+  /* ---------- equalizer ---------- */
+  .eq-row {
+    display: flex; justify-content: space-between; gap: 6px;
+    overflow-x: auto; padding: 6px 2px 2px;
+  }
+  .eq-band {
+    display: flex; flex-direction: column; align-items: center;
+    min-width: 58px; flex: 1;
+  }
+  .eq-val {
+    font-size: 11px; color: var(--accent); font-weight: 500;
+    min-height: 16px; margin-bottom: 6px;
+  }
+  .eq-slider {
+    height: 160px; width: 30px;
+    display: flex; align-items: center; justify-content: center;
+    position: relative;
+  }
+  .eq-slider input[type="range"] {
+    width: 150px;
+    transform: rotate(-90deg);
+    flex: none;
+  }
+  .eq-freq {
+    font-size: 11px; color: var(--text-dim);
+    letter-spacing: 0.06em; margin-top: 6px;
+  }
+  .eq-zero {
+    position: absolute; left: 50%; top: 50%;
+    width: 150px; height: 1px;
+    background: rgba(67, 198, 221, 0.25);
+    transform: translate(-50%, -50%) rotate(-90deg);
+    pointer-events: none;
+  }
+  .eq-row::-webkit-scrollbar { height: 6px; }
+  .eq-row::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+  /* ---------- listen ---------- */
+  .listen-row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .listen-btn.playing { border-color: rgba(61, 220, 132, 0.6); color: var(--green); background: rgba(61, 220, 132, 0.08); }
+  .listen-btn.playing::before { content: "● "; }
+
+  /* ---------- command / console ---------- */
+  .cmd-box {
+    background: #080d13;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+    font-size: 12.5px; line-height: 1.7;
+    color: #8fd0e0;
+    white-space: pre-wrap; word-break: break-all;
+    max-height: 200px; overflow: auto;
+  }
+  .cmd-actions { display: flex; align-items: center; gap: 12px; margin-top: 10px; flex-wrap: wrap; }
+  .cmd-actions .note { font-size: 11px; color: var(--text-dim); }
+
+  .console-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .console-head .grow { flex: 1; }
+  .console {
+    background: #080d13;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px 14px;
+    height: 320px; overflow-y: auto;
+    font-size: 12px; line-height: 1.65;
+  }
+  .console .line { white-space: pre-wrap; word-break: break-all; color: var(--text-dim); }
+  .console .line .ts { color: #3d4c60; margin-right: 8px; }
+  .console .line.panel { color: var(--accent); }
+  .console .line.err { color: var(--red); }
+  .console .empty { color: #3d4c60; }
+  .console::-webkit-scrollbar, .cmd-box::-webkit-scrollbar { width: 6px; }
+  .console::-webkit-scrollbar-thumb, .cmd-box::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+  footer {
+    max-width: 1560px; margin: 0 auto; padding: 0 16px 26px;
+    color: var(--text-dim); font-size: 11.5px; letter-spacing: 0.04em;
+  }
+  footer code { color: var(--accent); }
+
+  .toast {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%) translateY(80px);
+    background: var(--panel-2); border: 1px solid var(--accent);
+    color: var(--text); font-size: 13px;
+    padding: 10px 18px; border-radius: var(--radius);
+    opacity: 0; transition: transform 0.25s ease, opacity 0.25s ease;
+    z-index: 50; pointer-events: none;
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  .toast.error { border-color: var(--red); color: var(--red); }
+
+  /* ---------- multi-station picker ---------- */
+  .station-picker {
+    display: flex; align-items: center; align-self: stretch; gap: 8px;
+    padding-left: 14px; margin-left: 4px;
+    border-left: 1px solid var(--border);
+  }
+  .station-picker select {
+    width: 220px; max-width: 32vw;
+    font-size: 12px; padding: 6px 28px 6px 10px;
+  }
+  .station-picker .btn { margin: 0; padding: 6px 10px; font-size: 11px; white-space: nowrap; }
+
+  .rp-summary {
+    margin: 12px 16px 0; padding: 7px 10px;
+    border: 1px solid var(--border); border-radius: var(--radius);
+    background: rgba(67, 198, 221, 0.04);
+    color: var(--text-dim); font-size: 10.5px; letter-spacing: 0.08em;
+  }
+  .rp-summary b { color: var(--green); font-weight: 700; }
+  .rp-station-name {
+    display: flex; align-items: center; gap: 8px;
+  }
+  .rp-station-name .id { color: var(--text-dim); font-size: 10.5px; }
+
+  /* при 1500px ширины рабочего окна селектор станций остаётся в одной строке */
+  @media (max-width: 1600px) {
+    header { gap: 6px; padding: 0 10px; }
+    .logo { padding-right: 10px; }
+    .nav-tab { padding: 0 10px; font-size: 11px; }
+    .station-picker { gap: 6px; padding-left: 8px; margin-left: 0; }
+    .station-picker select { width: 190px; font-size: 11.5px; }
+    .station-picker .btn { padding: 6px 8px; }
+    .bypass-toggle { padding: 5px 7px; }
+    header .btn { padding: 7px 10px; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .rp-status.running .dot { animation: none; }
+    * { transition-duration: 0.01ms !important; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <svg width="18" height="18" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+      <rect x="1" y="11" width="3" height="8" fill="#3ddc84"/>
+      <rect x="6" y="7" width="3" height="12" fill="#ffd54a"/>
+      <rect x="11" y="4" width="3" height="15" fill="#ff9f2e"/>
+      <rect x="16" y="1" width="3" height="18" fill="#ff5252"/>
+    </svg>
+    FFMPEG <span class="arrow">→</span> ICECAST
+  </div>
+
+  <nav class="nav-tabs" role="tablist" aria-label="Разделы панели">
+    <button class="nav-tab active" role="tab" aria-selected="true" data-tab="processing">Обработка</button>
+    <button class="nav-tab" role="tab" aria-selected="false" data-tab="output">Вывод и контроль</button>
+    <button class="nav-tab" role="tab" aria-selected="false" data-tab="system">Команда и лог</button>
+  </nav>
+
+  <div class="station-picker" aria-label="Станции">
+    <select id="stationSelect" aria-label="Выбранная станция"></select>
+    <button class="btn" id="btnAddStation" title="Добавить поток">+ Поток</button>
+    <button class="btn danger" id="btnDeleteStation" title="Удалить выбранную станцию">Удалить</button>
+  </div>
+
+  <div class="spacer"></div>
+
+  <label class="bypass-toggle" id="bypassToggle" title="Обход всей обработки: поток идёт без EQ, усиления, компрессора, нормализации и лимитера">
+    <span class="switch"><input type="checkbox" id="bypass"><span class="track"></span></span>
+    BYPASS
+  </label>
+
+  <button class="btn primary" id="btnStart">▶ Старт</button>
+  <button class="btn" id="btnRestart">⟳ Перезапуск</button>
+  <button class="btn danger" id="btnStop">■ Стоп</button>
+</header>
+
+<div class="layout">
+  <main>
+    <!-- ======================== TAB: ОБРАБОТКА ======================== -->
+    <div class="tab-page active" id="tab-processing" role="tabpanel">
+
+      <section class="card s4">
+        <div class="card-head"><h2><span class="idx">01</span>Источник</h2></div>
+        <div class="fields">
+          <div class="field">
+            <label>URL потока (AAC / HE-AAC / MP3)</label>
+            <input type="text" id="src_url" placeholder="http://host:8000/stream" spellcheck="false">
+          </div>
+          <div class="field">
+            <div class="checkline">
+              <span class="grow">Переподключаться при обрыве</span>
+              <span class="switch"><input type="checkbox" id="src_reconnect"><span class="track"></span></span>
+            </div>
+          </div>
+          <div class="field">
+            <label>Макс. задержка переподключения, с <span class="val" id="src_reconnect_delay_max_val"></span></label>
+            <input type="range" id="src_reconnect_delay_max" min="1" max="30" step="1">
+          </div>
+        </div>
+      </section>
+
+      <section class="card s8" id="cardEqualizer">
+        <div class="card-head">
+          <h2><span class="idx">02</span>Эквалайзер · 10 полос</h2>
+          <div class="tools">
+            <select id="eq_preset">
+              <option value="">Пресет…</option>
+              <option value="flat">Плоский</option>
+              <option value="voice">Речь (разборчивость)</option>
+              <option value="music">Музыка (V-кривая)</option>
+              <option value="bass">Бас-буст</option>
+              <option value="bright">Яркие верха</option>
+            </select>
+            <button class="btn" id="btnEqReset">Сброс</button>
+            <span class="switch"><input type="checkbox" id="eq_enabled"><span class="track"></span></span>
+          </div>
+        </div>
+        <div class="fields">
+          <div class="eq-wrap" id="eqBandsWrap">
+            <div class="eq-row" id="eqRow"></div>
+          </div>
+          <div class="field">
+            <div class="checkline">
+              <span class="grow">Усиление после EQ <span class="val" id="gain_db_val"></span></span>
+              <span class="switch"><input type="checkbox" id="gain_enabled"><span class="track"></span></span>
+            </div>
+            <input type="range" id="gain_db" min="-24" max="24" step="0.5" value="0">
+            <div class="hint">Статическое усиление/ослабление перед компрессором · ±24 дБ</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card s4" id="cardCompressor">
+        <div class="card-head">
+          <h2><span class="idx">03</span>Компрессор</h2>
+          <span class="switch"><input type="checkbox" id="comp_enabled"><span class="track"></span></span>
+        </div>
+        <div class="fields">
+          <div class="field">
+            <label>Порог, dB <span class="val" id="comp_threshold_val"></span></label>
+            <input type="range" id="comp_threshold" min="-60" max="0" step="1">
+          </div>
+          <div class="field">
+            <label>Ratio <span class="val" id="comp_ratio_val"></span></label>
+            <input type="range" id="comp_ratio" min="1" max="20" step="0.5">
+          </div>
+          <div class="row2">
+            <div class="field">
+              <label>Attack, мс <span class="val" id="comp_attack_val"></span></label>
+              <input type="range" id="comp_attack" min="1" max="100" step="1">
+            </div>
+            <div class="field">
+              <label>Release, мс <span class="val" id="comp_release_val"></span></label>
+              <input type="range" id="comp_release" min="20" max="1000" step="10">
+            </div>
+          </div>
+          <div class="field">
+            <label>Makeup, dB <span class="val" id="comp_makeup_val"></span></label>
+            <input type="range" id="comp_makeup" min="0" max="24" step="0.5">
+          </div>
+        </div>
+      </section>
+
+      <section class="card s4" id="cardLoudnorm">
+        <div class="card-head">
+          <h2><span class="idx">04</span>Громкость (EBU R128)</h2>
+          <span class="switch"><input type="checkbox" id="ln_enabled"><span class="track"></span></span>
+        </div>
+        <div class="fields">
+          <div class="field">
+            <label>Целевая громкость, LUFS <span class="val" id="ln_i_val"></span></label>
+            <input type="range" id="ln_i" min="-40" max="-5" step="0.5">
+            <div class="hint">−16 … −14 — интернет-радио · −23 — эфирное вещание</div>
+          </div>
+          <div class="row2">
+            <div class="field">
+              <label>True Peak, dBTP <span class="val" id="ln_tp_val"></span></label>
+              <input type="range" id="ln_tp" min="-6" max="0" step="0.5">
+            </div>
+            <div class="field">
+              <label>LRA, LU <span class="val" id="ln_lra_val"></span></label>
+              <input type="range" id="ln_lra" min="1" max="20" step="1">
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card s4" id="cardLimiter">
+        <div class="card-head">
+          <h2><span class="idx">05</span>Лимитер</h2>
+          <span class="switch"><input type="checkbox" id="lim_enabled"><span class="track"></span></span>
+        </div>
+        <div class="fields">
+          <div class="field">
+            <label>Потолок, dBTP <span class="val" id="lim_ceiling_db_val"></span></label>
+            <input type="range" id="lim_ceiling_db" min="-6" max="0" step="0.1">
+            <div class="hint">Защита от клиппинга после кодирования в AAC</div>
+          </div>
+          <div class="row2">
+            <div class="field">
+              <label>Attack, мс <span class="val" id="lim_attack_val"></span></label>
+              <input type="range" id="lim_attack" min="1" max="50" step="1">
+            </div>
+            <div class="field">
+              <label>Release, мс <span class="val" id="lim_release_val"></span></label>
+              <input type="range" id="lim_release" min="10" max="500" step="10">
+            </div>
+          </div>
+        </div>
+      </section>
+
+    </div>
+
+    <!-- ======================== TAB: ВЫВОД И КОНТРОЛЬ ======================== -->
+    <div class="tab-page" id="tab-output" role="tabpanel">
+
+      <section class="card s4">
+        <div class="card-head"><h2><span class="idx">06</span>Кодирование</h2></div>
+        <div class="fields">
+          <div class="field">
+            <label>Кодек AAC</label>
+            <select id="enc_codec" style="width:100%">
+              <option value="aac">aac (встроенный)</option>
+              <option value="libfdk_aac">libfdk_aac (качественнее)</option>
+            </select>
+          </div>
+          <div class="row2">
+            <div class="field">
+              <label>Битрейт</label>
+              <select id="enc_bitrate" style="width:100%">
+                <option>64</option><option>96</option><option>128</option>
+                <option>160</option><option>192</option><option>256</option><option>320</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>Частота, Гц</label>
+              <select id="enc_sample_rate" style="width:100%">
+                <option>32000</option><option>44100</option><option>48000</option>
+              </select>
+            </div>
+          </div>
+          <div class="field">
+            <label>Каналы</label>
+            <select id="enc_channels" style="width:100%">
+              <option value="2">Стерео</option>
+              <option value="1">Моно</option>
+            </select>
+          </div>
+        </div>
+      </section>
+
+      <section class="card s4">
+        <div class="card-head"><h2><span class="idx">07</span>Icecast</h2></div>
+        <div class="fields">
+          <div class="row2">
+            <div class="field">
+              <label>Хост</label>
+              <input type="text" id="ice_host" spellcheck="false">
+            </div>
+            <div class="field">
+              <label>Порт</label>
+              <input type="number" id="ice_port" min="1" max="65535">
+            </div>
+          </div>
+          <div class="field">
+            <label>Точка монтирования</label>
+            <input type="text" id="ice_mount" placeholder="/stream" spellcheck="false">
+          </div>
+          <div class="row2">
+            <div class="field">
+              <label>Пользователь</label>
+              <input type="text" id="ice_user" spellcheck="false">
+            </div>
+            <div class="field">
+              <label>Пароль</label>
+              <input type="password" id="ice_password" autocomplete="off">
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card s4">
+        <div class="card-head"><h2><span class="idx">08</span>Служба</h2></div>
+        <div class="fields">
+          <div class="field">
+            <label>Движок обработки</label>
+            <select id="engine" style="width:100%">
+              <option value="ffmpeg">FFmpeg — процесс на хосте</option>
+              <option value="liquidsoap">Liquidsoap — Docker-воркер</option>
+            </select>
+          </div>
+          <div class="field">
+            <div class="checkline">
+              <span class="grow">Автоперезапуск при падении</span>
+              <span class="switch"><input type="checkbox" id="ar_enabled"><span class="track"></span></span>
+            </div>
+          </div>
+          <div class="field">
+            <label>Задержка перезапуска, с <span class="val" id="ar_delay_val"></span></label>
+            <input type="range" id="ar_delay" min="1" max="60" step="1">
+          </div>
+          <div class="field">
+            <label>Путь к ffmpeg (пусто = из PATH)</label>
+            <input type="text" id="ffmpeg_path" placeholder="C:\ffmpeg\bin\ffmpeg.exe" spellcheck="false">
+          </div>
+          <div class="field">
+            <div class="checkline">
+              <span class="grow" style="color: var(--text-dim); font-size: 12px;">Настройки сохраняются в config.json при старте и по кнопке</span>
+              <button class="btn" id="btnSave">Сохранить</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card s12">
+        <div class="card-head"><h2><span class="idx">09</span>Прослушка A/B</h2></div>
+        <div class="fields">
+          <div class="listen-row">
+            <button class="btn listen-btn" id="btnListenInput">Вход (исходный)</button>
+            <button class="btn listen-btn" id="btnListenOutput">Выход (после обработки)</button>
+            <button class="btn danger" id="btnListenStop">■ Стоп</button>
+            <span style="flex:1"></span>
+            <span style="display:inline-flex; align-items:center; gap:10px; min-width:220px; flex:0 1 260px;">
+              <span style="font-size:10.5px; color:var(--text-dim); letter-spacing:0.1em;">ГРОМКОСТЬ <span class="val" id="listen_vol_val" style="color:var(--accent)">80%</span></span>
+              <input type="range" id="listen_vol" min="0" max="100" step="1" value="80">
+            </span>
+          </div>
+          <div class="hint" id="listenStatus" style="margin-top:8px">Мониторинг идёт отдельным MP3-каналом (задержка 1–3 с) — только для сравнения звука на слух</div>
+        </div>
+      </section>
+
+    </div>
+
+    <!-- ======================== TAB: КОМАНДА И ЛОГ ======================== -->
+    <div class="tab-page" id="tab-system" role="tabpanel">
+
+      <section class="card s12">
+        <div class="card-head"><h2><span class="idx">10</span>Команда FFmpeg</h2></div>
+        <div class="cmd-box" id="cmdBox">…</div>
+        <div class="cmd-actions">
+          <button class="btn" id="btnCopy">Копировать</button>
+          <span class="note">Итоговая команда — обновляется при любом изменении настроек</span>
+        </div>
+      </section>
+
+      <section class="card s12">
+        <div class="card-head console-head">
+          <h2><span class="idx">11</span>Лог FFmpeg</h2>
+          <span class="grow"></span>
+          <div class="checkline" style="font-size: 12px; color: var(--text-dim);">
+            Автопрокрутка
+            <span class="switch"><input type="checkbox" id="autoscroll" checked><span class="track"></span></span>
+          </div>
+          <button class="btn" id="btnClearLog">Очистить</button>
+        </div>
+        <div class="console" id="console"><div class="empty">Лог пуст — нажмите «Старт»</div></div>
+      </section>
+
+    </div>
+  </main>
+
+  <!-- ======================== RIGHT PANEL ======================== -->
+  <aside class="right-panel">
+    <div class="rp-title">Stream Info</div>
+    <div class="rp-summary" id="rpSummary">0 работает · 0 остановлено</div>
+
+    <div class="rp-row rp-station-name">
+      <span class="k">Станция</span>
+      <span class="v mono"><span id="rpStationName">—</span> <span class="id" id="rpStationId"></span></span>
+    </div>
+
+    <div class="rp-status" id="rpStatus">
+      <span class="dot"></span><span id="rpStatusText">ОСТАНОВЛЕН</span>
+    </div>
+
+    <div class="rp-row"><span class="k">PID</span><span class="v mono" id="rpPid">—</span></div>
+    <div class="rp-row"><span class="k">Аптайм</span><span class="v mono" id="rpUptime">—</span></div>
+    <div class="rp-row"><span class="k">Рестартов</span><span class="v mono" id="rpRestarts">0</span></div>
+    <div class="rp-row"><span class="k">FFmpeg</span><span class="v mono" id="rpFfmpeg">—</span></div>
+
+    <div class="rp-section-label">Вход</div>
+    <div class="rp-row"><span class="v mono" id="rpInput" style="text-align:left">—</span></div>
+
+    <div class="rp-section-label">Выход</div>
+    <div class="rp-row"><span class="v mono" id="rpOutput" style="text-align:left">—</span></div>
+
+    <div class="rp-section-label">Цепочка обработки</div>
+    <div class="rp-chain" id="rpChain"></div>
+  </aside>
+</div>
+
+<footer>
+  Цепочка каждой станции: источник AAC / HE-AAC / MP3 → <code>equalizer</code> → <code>acompressor</code> → <code>loudnorm</code> → <code>alimiter</code> → AAC → Icecast (ADTS).
+  Реестр станций хранится в <code>streams.json</code> рядом с <code>app.py</code>.
+</footer>
+
+<div class="toast" id="toast"></div>
+
+<script src="/static/app.js"></script>
+<script type="text/plain" id="legacyInlineScript">
+"use strict";
+
+const $ = (id) => document.getElementById(id);
+
+/* ---------- tabs ---------- */
+
+function activateTab(name) {
+  const tab = document.querySelector('.nav-tab[data-tab="' + name + '"]');
+  if (!tab) return;
+  document.querySelectorAll(".nav-tab").forEach((t) => {
+    t.classList.toggle("active", t === tab);
+    t.setAttribute("aria-selected", t === tab ? "true" : "false");
+  });
+  document.querySelectorAll(".tab-page").forEach((p) => {
+    p.classList.toggle("active", p.id === "tab-" + tab.dataset.tab);
+  });
+}
+
+document.querySelectorAll(".nav-tab").forEach((tab) => {
+  tab.addEventListener("click", () => {
+    activateTab(tab.dataset.tab);
+    history.replaceState(null, "", "#" + tab.dataset.tab);
+  });
+});
+if (location.hash) activateTab(location.hash.slice(1));
+
+/* ---------- equalizer ---------- */
+
+const EQ_FREQS = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
+const EQ_LABELS = ["31", "62", "125", "250", "500", "1k", "2k", "4k", "8k", "16k"];
+const EQ_PRESETS = {
+  flat:   [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+  voice:  [-6, -4, -2, 0, 1, 2, 3, 2, 0, -2],
+  music:  [3, 2, 1, 0, -1, -1, 0, 2, 3, 2],
+  bass:   [6, 5, 4, 2, 1, 0, 0, 0, 0, 0],
+  bright: [-1, -1, 0, 0, 0, 0, 1, 3, 5, 5],
+};
+
+function buildEqBands() {
+  const row = $("eqRow");
+  EQ_FREQS.forEach((freq, i) => {
+    const band = document.createElement("div");
+    band.className = "eq-band";
+
+    const val = document.createElement("span");
+    val.className = "eq-val";
+    val.id = "eq_val_" + i;
+    val.textContent = "0";
+
+    const sliderWrap = document.createElement("div");
+    sliderWrap.className = "eq-slider";
+    const slider = document.createElement("input");
+    slider.type = "range";
+    slider.id = "eq_b" + i;
+    slider.min = -12; slider.max = 12; slider.step = 0.5; slider.value = 0;
+    slider.setAttribute("aria-label", "Полоса " + EQ_LABELS[i] + " Гц");
+    slider.addEventListener("input", () => { syncEqLabels(); refreshCommand(); });
+    slider.addEventListener("dblclick", () => { slider.value = 0; syncEqLabels(); refreshCommand(); });
+    const zero = document.createElement("div");
+    zero.className = "eq-zero";
+    sliderWrap.appendChild(slider);
+    sliderWrap.appendChild(zero);
+
+    const lab = document.createElement("span");
+    lab.className = "eq-freq";
+    lab.textContent = EQ_LABELS[i];
+
+    band.appendChild(val);
+    band.appendChild(sliderWrap);
+    band.appendChild(lab);
+    row.appendChild(band);
+  });
+}
+
+function syncEqLabels() {
+  for (let i = 0; i < EQ_FREQS.length; i++) {
+    const v = parseFloat($("eq_b" + i).value);
+    $("eq_val_" + i).textContent = (v > 0 ? "+" : "") + v;
+    $("eq_val_" + i).style.color = v === 0 ? "var(--text-dim)" : "var(--accent)";
+  }
+}
+
+function applyEqPreset(name) {
+  const gains = EQ_PRESETS[name];
+  if (!gains) return;
+  gains.forEach((g, i) => { $("eq_b" + i).value = g; });
+  syncEqLabels();
+  refreshCommand();
+}
+
+$("eq_preset").addEventListener("change", (e) => {
+  if (e.target.value) {
+    applyEqPreset(e.target.value);
+    $("eq_enabled").checked = true;
+    syncCardState();
+  }
+});
+
+$("btnEqReset").addEventListener("click", () => {
+  applyEqPreset("flat");
+  $("eq_preset").value = "";
+});
+
+/* ---------- config <-> form ---------- */
+
+const FIELDS = {
+  bypass:         ["bypass", "bool"],
+  src_url:        ["source", "url"],
+  src_reconnect:  ["source", "reconnect", "bool"],
+  src_reconnect_delay_max: ["source", "reconnect_delay_max", "num"],
+  eq_enabled:     ["equalizer", "enabled", "bool"],
+  comp_enabled:   ["compressor", "enabled", "bool"],
+  comp_threshold: ["compressor", "threshold", "num"],
+  comp_ratio:     ["compressor", "ratio", "num"],
+  comp_attack:    ["compressor", "attack", "num"],
+  comp_release:   ["compressor", "release", "num"],
+  comp_makeup:    ["compressor", "makeup", "num"],
+  ln_enabled:     ["loudnorm", "enabled", "bool"],
+  ln_i:           ["loudnorm", "i", "num"],
+  ln_tp:          ["loudnorm", "tp", "num"],
+  ln_lra:         ["loudnorm", "lra", "num"],
+  lim_enabled:    ["limiter", "enabled", "bool"],
+  lim_ceiling_db: ["limiter", "ceiling_db", "num"],
+  lim_attack:     ["limiter", "attack", "num"],
+  lim_release:    ["limiter", "release", "num"],
+  enc_codec:      ["encoder", "codec"],
+  enc_bitrate:    ["encoder", "bitrate", "num"],
+  enc_sample_rate:["encoder", "sample_rate", "num"],
+  enc_channels:   ["encoder", "channels", "num"],
+  ice_host:       ["icecast", "host"],
+  ice_port:       ["icecast", "port", "num"],
+  ice_mount:      ["icecast", "mount"],
+  ice_user:       ["icecast", "user"],
+  ice_password:   ["icecast", "password"],
+  ffmpeg_path:    ["ffmpeg_path"],
+  ar_enabled:     ["autorestart", "enabled", "bool"],
+  ar_delay:       ["autorestart", "delay", "num"],
+};
+
+function collectConfig() {
+  const cfg = {};
+  for (const [id, path] of Object.entries(FIELDS)) {
+    const el = $(id);
+    let value = el.type === "checkbox" ? el.checked : el.value;
+    if (path.includes("num")) value = parseFloat(value);
+    let node = cfg;
+    const keys = path.filter((k) => k !== "num" && k !== "bool");
+    for (let i = 0; i < keys.length - 1; i++) {
+      node[keys[i]] = node[keys[i]] || {};
+      node = node[keys[i]];
+    }
+    node[keys[keys.length - 1]] = value;
+  }
+  cfg.equalizer.gains = EQ_FREQS.map((_, i) => parseFloat($("eq_b" + i).value));
+  return cfg;
+}
+
+function fillForm(cfg) {
+  for (const [id, path] of Object.entries(FIELDS)) {
+    const keys = path.filter((k) => k !== "num" && k !== "bool");
+    let node = cfg;
+    for (const k of keys) node = node ? node[k] : undefined;
+    if (node === undefined) continue;
+    const el = $(id);
+    if (el.type === "checkbox") el.checked = Boolean(node);
+    else el.value = node;
+  }
+  const gains = (cfg.equalizer && cfg.equalizer.gains) || [];
+  gains.forEach((g, i) => { if (i < EQ_FREQS.length) $("eq_b" + i).value = g; });
+  syncEqLabels();
+  syncLabels();
+  syncCardState();
+}
+
+/* ---------- labels & disabled sections ---------- */
+
+const LABEL_FMT = {
+  comp_threshold: (v) => v + " dB",
+  comp_ratio: (v) => v + " : 1",
+  comp_attack: (v) => v + " мс",
+  comp_release: (v) => v + " мс",
+  comp_makeup: (v) => "+" + v + " dB",
+  ln_i: (v) => v + " LUFS",
+  ln_tp: (v) => v + " dBTP",
+  ln_lra: (v) => v + " LU",
+  lim_ceiling_db: (v) => v + " dBTP",
+  lim_attack: (v) => v + " мс",
+  lim_release: (v) => v + " мс",
+  src_reconnect_delay_max: (v) => v + " с",
+  ar_delay: (v) => v + " с",
+};
+
+function syncLabels() {
+  for (const [id, fmt] of Object.entries(LABEL_FMT)) {
+    const target = $(id + "_val");
+    if (target) target.textContent = fmt($(id).value);
+  }
+}
+
+function syncCardState() {
+  const bypass = $("bypass").checked;
+  $("bypassToggle").classList.toggle("on", bypass);
+  $("cardEqualizer").classList.toggle("disabled", bypass || !$("eq_enabled").checked);
+  $("cardCompressor").classList.toggle("disabled", bypass || !$("comp_enabled").checked);
+  $("cardLoudnorm").classList.toggle("disabled", bypass || !$("ln_enabled").checked);
+  $("cardLimiter").classList.toggle("disabled", bypass || !$("lim_enabled").checked);
+}
+
+/* ---------- right panel: chain + urls ---------- */
+
+function syncChain() {
+  const cfg = collectConfig();
+  $("rpInput").textContent = cfg.source.url || "—";
+  $("rpOutput").textContent =
+    "icecast://" + cfg.icecast.host + ":" + cfg.icecast.port + "/" +
+    String(cfg.icecast.mount).replace(/^\/+/, "");
+
+  const chain = $("rpChain");
+  chain.innerHTML = "";
+  if (cfg.bypass) {
+    const chip = document.createElement("span");
+    chip.className = "chip bypass";
+    chip.textContent = "BYPASS — ОБХОД";
+    chain.appendChild(chip);
+    return;
+  }
+  const steps = [
+    { name: "EQ", on: cfg.equalizer.enabled && cfg.equalizer.gains.some((g) => g !== 0) },
+    { name: "COMP", on: cfg.compressor.enabled },
+    { name: "LUFS", on: cfg.loudnorm.enabled },
+    { name: "LIM", on: cfg.limiter.enabled },
+  ];
+  steps.forEach((s, i) => {
+    if (i > 0) {
+      const arr = document.createElement("span");
+      arr.className = "arr";
+      arr.textContent = "→";
+      chain.appendChild(arr);
+    }
+    const chip = document.createElement("span");
+    chip.className = "chip" + (s.on ? " on" : "");
+    chip.textContent = s.name;
+    chain.appendChild(chip);
+  });
+}
+
+/* ---------- command preview ---------- */
+
+let cmdTimer = null;
+function refreshCommand() {
+  clearTimeout(cmdTimer);
+  cmdTimer = setTimeout(async () => {
+    try {
+      const res = await fetch("/api/command", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(collectConfig()),
+      });
+      const data = await res.json();
+      $("cmdBox").textContent = data.text;
+    } catch (e) { /* ignore */ }
+    syncChain();
+  }, 150);
+}
+
+/* ---------- toast ---------- */
+
+let toastTimer = null;
+function toast(msg, isError) {
+  const el = $("toast");
+  el.textContent = msg;
+  el.classList.toggle("error", Boolean(isError));
+  el.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove("show"), 2600);
+}
+
+/* ---------- actions ---------- */
+
+async function postJSON(url, body) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  return res.json();
+}
+
+$("btnSave").addEventListener("click", async () => {
+  const data = await postJSON("/api/config", collectConfig());
+  toast(data.ok ? "Настройки сохранены" : "Ошибка сохранения", !data.ok);
+});
+
+$("btnStart").addEventListener("click", async () => {
+  const data = await postJSON("/api/start", collectConfig());
+  toast(data.message, !data.ok);
+  pollStatus();
+});
+
+$("btnRestart").addEventListener("click", async () => {
+  const data = await postJSON("/api/restart", collectConfig());
+  toast(data.message, !data.ok);
+  pollStatus();
+});
+
+$("btnStop").addEventListener("click", async () => {
+  const data = await postJSON("/api/stop");
+  toast(data.message, !data.ok);
+  pollStatus();
+});
+
+$("btnCopy").addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText($("cmdBox").textContent);
+    toast("Команда скопирована");
+  } catch (e) {
+    toast("Не удалось скопировать", true);
+  }
+});
+
+$("btnClearLog").addEventListener("click", () => {
+  $("console").innerHTML = "";
+});
+
+/* ---------- A/B listening ---------- */
+
+const audio = new Audio();
+audio.preload = "none";
+let listening = null; // "input" | "output" | null
+const LISTEN_HINT = "Мониторинг идёт отдельным MP3-каналом (задержка 1–3 с) — только для сравнения звука на слух";
+
+function updateListenUI() {
+  $("btnListenInput").classList.toggle("playing", listening === "input");
+  $("btnListenOutput").classList.toggle("playing", listening === "output");
+  $("listenStatus").textContent = listening
+    ? "Играет: " + (listening === "input" ? "входной поток (исходный)" : "выходной поток (после обработки)")
+    : LISTEN_HINT;
+  $("listenStatus").style.color = listening ? "var(--green)" : "";
+}
+
+function stopListen() {
+  listening = null;
+  audio.pause();
+  audio.removeAttribute("src");
+  audio.load();
+  updateListenUI();
+}
+
+async function toggleListen(which) {
+  if (listening === which) { stopListen(); return; }
+  await postJSON("/api/config", collectConfig());
+  audio.pause();
+  audio.volume = $("listen_vol").value / 100;
+  audio.src = "/api/listen/" + which + "?t=" + Date.now();
+  listening = which;
+  updateListenUI();
+  try {
+    await audio.play();
+  } catch (e) {
+    toast("Браузер заблокировал воспроизведение", true);
+    stopListen();
+  }
+}
+
+$("btnListenInput").addEventListener("click", () => toggleListen("input"));
+$("btnListenOutput").addEventListener("click", () => toggleListen("output"));
+$("btnListenStop").addEventListener("click", stopListen);
+audio.addEventListener("error", () => {
+  if (listening) { toast("Поток недоступен — проверьте источник/выход", true); stopListen(); }
+});
+audio.addEventListener("ended", stopListen);
+$("listen_vol").addEventListener("input", () => {
+  audio.volume = $("listen_vol").value / 100;
+  $("listen_vol_val").textContent = $("listen_vol").value + "%";
+});
+
+/* ---------- status polling ---------- */
+
+function fmtUptime(sec) {
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  return (h ? h + "ч " : "") + (m ? m + "м " : "") + s + "с";
+}
+
+async function pollStatus() {
+  try {
+    const st = await (await fetch("/api/status")).json();
+    $("rpStatus").classList.toggle("running", st.running);
+    $("rpStatusText").textContent = st.running ? "РАБОТАЕТ" : "ОСТАНОВЛЕН";
+    $("rpPid").textContent = st.running ? st.pid : "—";
+    $("rpUptime").textContent = st.running ? fmtUptime(st.uptime) : "—";
+    $("rpRestarts").textContent = st.restarts;
+    $("rpFfmpeg").textContent = st.ffmpeg_found
+      ? (st.ffmpeg_version || "найден").split(" Copyright")[0].replace("ffmpeg version ", "v")
+      : "НЕ НАЙДЕН";
+    $("rpFfmpeg").style.color = st.ffmpeg_found ? "" : "var(--red)";
+    $("btnStart").disabled = st.running;
+    $("btnStop").disabled = !st.running;
+  } catch (e) { /* ignore */ }
+}
+setInterval(pollStatus, 2000);
+
+/* ---------- log polling ---------- */
+
+let lastLogId = 0;
+async function pollLogs() {
+  try {
+    const data = await (await fetch("/api/logs?since=" + lastLogId)).json();
+    if (data.logs.length) {
+      const box = $("console");
+      const empty = box.querySelector(".empty");
+      if (empty) empty.remove();
+      for (const entry of data.logs) {
+        const div = document.createElement("div");
+        div.className = "line";
+        if (entry.line.startsWith("[panel]")) div.classList.add("panel");
+        if (/\berror\b|failed|invalid|не найден|не удалось/i.test(entry.line)) div.classList.add("err");
+        const ts = document.createElement("span");
+        ts.className = "ts";
+        ts.textContent = entry.ts;
+        div.appendChild(ts);
+        div.appendChild(document.createTextNode(entry.line));
+        box.appendChild(div);
+        lastLogId = entry.id;
+      }
+      while (box.children.length > 1500) box.removeChild(box.firstChild);
+      if ($("autoscroll").checked) box.scrollTop = box.scrollHeight;
+    }
+  } catch (e) { /* ignore */ }
+}
+setInterval(pollLogs, 1000);
+
+/* ---------- init ---------- */
+
+for (const id of Object.keys(FIELDS)) {
+  $(id).addEventListener("input", () => { syncLabels(); syncCardState(); refreshCommand(); });
+}
+
+buildEqBands();
+
+// риски шкал под горизонтальными слайдерами (стилистика приборов анализатора)
+document.querySelectorAll('.field input[type="range"], .listen-row input[type="range"]').forEach((el) => {
+  const t = document.createElement("div");
+  t.className = "ticks";
+  el.insertAdjacentElement("afterend", t);
+});
+
+(async () => {
+  const cfg = await (await fetch("/api/config")).json();
+  fillForm(cfg);
+  refreshCommand();
+  pollStatus();
+  pollLogs();
+})();
+</script>
+</body>
+</html>

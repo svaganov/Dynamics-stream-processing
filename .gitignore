@@ -1,0 +1,16 @@
+# Реестр станций и рантайм-скрипты воркеров — внутри пароли Icecast
+streams.json
+app/runtime/
+data/
+
+# Тестовые окружения и кэши Python
+.test-venv/
+__pycache__/
+*.pyc
+
+# Временные пробы Liquidsoap
+.liq-probe*
+
+# Локальные логи и файлы-посредники
+.smoke-server.log
+.wb-*.json

@@ -1,0 +1,151 @@
+"""Тесты генератора Liquidsoap-скриптов и диспетчеризации движков."""
+
+import copy
+import importlib.util
+import os
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+APP_PATH = PROJECT_ROOT / "app" / "app.py"
+
+spec = importlib.util.spec_from_file_location("panel_app_liq", APP_PATH)
+panel = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(panel)
+
+sys.path.insert(0, str(PROJECT_ROOT / "app"))
+import liq  # noqa: E402
+
+
+def make_cfg(**overrides):
+    cfg = {
+        "id": "station-7",
+        "name": "Радио 7",
+        "bypass": False,
+        "source": {"url": "http://host:8000/live", "reconnect": True, "reconnect_delay_max": 5},
+        "equalizer": {"enabled": True, "gains": [3, 0, 1, 0, 0, 0, 0, 0, 2, 0]},
+        "gain": {"enabled": True, "db": 2.5},
+        "compressor": {"enabled": True, "threshold": -20, "ratio": 4, "attack": 5, "release": 120, "makeup": 6},
+        "loudnorm": {"enabled": True, "i": -14, "tp": -1.5, "lra": 11},
+        "limiter": {"enabled": True, "ceiling_db": -1.0, "attack": 5, "release": 50},
+        "encoder": {"codec": "aac", "bitrate": 128, "sample_rate": 44100, "channels": 2},
+        "icecast": {"host": "ice.example", "port": 8000, "mount": "/radio7",
+                    "user": "source", "password": "s3cret"},
+    }
+    cfg.update(overrides)
+    return cfg
+
+
+class LiqGeneratorTest(unittest.TestCase):
+    def test_full_chain_order_and_params(self):
+        script = liq.generate_liq_script(make_cfg())
+        # порядок вложенных вызовов: alimiter(... loudnorm(... acompressor(... volume(... equalizer(...))))
+        pos_lim = script.index("ffmpeg.filter.alimiter")
+        pos_ln = script.index("ffmpeg.filter.loudnorm")
+        pos_comp = script.index("ffmpeg.filter.acompressor")
+        pos_vol = script.index('ffmpeg.filter.volume(volume="+2.5dB"')
+        pos_eq = script.index("ffmpeg.filter.equalizer(f=31")
+        self.assertLess(pos_lim, pos_ln)
+        self.assertLess(pos_ln, pos_comp)
+        self.assertLess(pos_comp, pos_vol)
+        self.assertLess(pos_vol, pos_eq)
+        # пороги/makeup переведены из dB в линейные
+        self.assertIn("threshold=0.1", script)
+        self.assertIn("makeup=1.995262", script)
+        self.assertIn("limit=0.891251", script)
+        # loudnorm — динамический режим
+        self.assertIn("linear=false", script)
+        # выход на Icecast с FDK-AAC
+        self.assertIn('host="ice.example"', script)
+        self.assertIn("mount=\"/radio7\"", script)
+        self.assertIn("%fdkaac(channels=2, samplerate=44100, bitrate=128", script)
+
+    def test_zero_eq_bands_skipped(self):
+        script = liq.generate_liq_script(make_cfg())
+        self.assertNotIn("g=0.0", script)
+        self.assertEqual(script.count("ffmpeg.filter.equalizer"), 3)
+
+    def test_bypass_has_no_filters(self):
+        script = liq.generate_liq_script(make_cfg(bypass=True))
+        self.assertNotIn("ffmpeg.filter", script)
+        self.assertNotIn("ffmpeg.raw", script)
+        self.assertIn("output.icecast", script)
+
+    def test_all_disabled_equals_no_filter_block(self):
+        cfg = make_cfg(equalizer={"enabled": False, "gains": [0] * 10},
+                       gain={"enabled": False, "db": 0},
+                       compressor={"enabled": False},
+                       loudnorm={"enabled": False},
+                       limiter={"enabled": False})
+        script = liq.generate_liq_script(cfg)
+        self.assertNotIn("ffmpeg.filter.create", script)
+
+    def test_password_masked(self):
+        cfg = make_cfg()
+        script = liq.generate_liq_script(cfg)
+        masked = liq.mask_liq_script(script, cfg)
+        self.assertNotIn("s3cret", masked)
+        self.assertIn('password="***"', masked)
+        self.assertIn("s3cret", script)  # в рабочем скрипте пароль настоящий
+
+    def test_strings_escaped(self):
+        cfg = make_cfg(source={"url": 'http://h/"q"', "reconnect": True, "reconnect_delay_max": 5},
+                       name='Радио "7"')
+        script = liq.generate_liq_script(cfg)
+        self.assertIn('source_url = "http://h/\\"q\\""', script)
+
+
+class EngineDispatchTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self.tmp.name)
+        panel.STREAMS_PATH = str(self.tmp_path / "streams.json")
+        panel.LEGACY_CONFIG_PATH = str(self.tmp_path / "config.json")
+        panel.RUNTIME_DIR = str(self.tmp_path / "runtime")
+        panel._managers.clear()
+        panel.app.config["TESTING"] = True
+        self.client = panel.app.test_client()
+
+    def tearDown(self):
+        panel._managers.clear()
+        self.tmp.cleanup()
+
+    def test_engine_normalized_and_dispatched(self):
+        station = self.client.post("/api/streams", json={"name": "Liq"}).get_json()["station"]
+        self.assertEqual(station["engine"], "ffmpeg")
+
+        updated = self.client.put("/api/streams/" + station["id"], json={
+            "engine": "liquidsoap",
+            "gain": {"enabled": True, "db": 40},
+        }).get_json()["station"]
+        self.assertEqual(updated["engine"], "liquidsoap")
+        self.assertEqual(updated["gain"]["db"], 24.0)  # кламп диапазона
+
+        manager = panel.get_manager(station["id"])
+        self.assertIsInstance(manager, panel.DockerWorkerManager)
+        status = manager.status()
+        self.assertEqual(status["engine"], "liquidsoap")
+        self.assertFalse(status["running"])
+
+        # обратная смена движка пересоздаёт менеджер
+        self.client.put("/api/streams/" + station["id"], json={"engine": "ffmpeg"})
+        manager = panel.get_manager(station["id"])
+        self.assertIsInstance(manager, panel.ProcessManager)
+
+    def test_command_endpoint_returns_liq_for_liquidsoap(self):
+        station = self.client.post("/api/streams", json={"name": "Liq"}).get_json()["station"]
+        self.client.put("/api/streams/" + station["id"], json={
+            "engine": "liquidsoap",
+            "equalizer": {"enabled": True, "gains": [1] + [0] * 9},
+        })
+        data = self.client.post("/api/streams/" + station["id"] + "/command",
+                                json={}).get_json()
+        self.assertEqual(data["cmd"], [])
+        self.assertIn("ffmpeg.filter.equalizer", data["text"])
+        self.assertNotIn('"hackme"', data["text"])
+
+
+if __name__ == "__main__":
+    unittest.main()

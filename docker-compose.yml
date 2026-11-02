@@ -1,0 +1,40 @@
+# Топология Этапа 2: 1 контейнер панели (control plane) + N контейнеров-воркеров
+# Liquidsoap, которые панель создаёт и уничтожает динамически через Docker API.
+# Воркеры открытых портов не имеют: тянут источники снаружи и пушат на Icecast.
+#
+# Запуск:  docker compose up -d --build
+# Панель:  http://127.0.0.1:8770
+#
+# Подключение к удалённому демену Docker (Linux-хост в сети):
+#   docker compose -H tcp://remote-host:2376 up -d --build
+# или через переменную окружения DOCKER_HOST=tcp://remote-host:2376.
+
+services:
+  # Control plane: реестр станций, жизненный цикл воркеров, UI.
+  panel:
+    build: ./app
+    image: audio-panel:2.0
+    ports:
+      - "8770:8770"
+    volumes:
+      # Доступ демона Docker: панель оркестрирует воркеров через API.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Реестр станций + runtime .liq воркеров (пути bind-mount'ов должны
+      # быть видны демону Docker, поэтому это хостовый том).
+      - ./data:/data
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8770
+      STREAMS_PATH: /data/streams.json
+      WORKER_RUNTIME_DIR: /data/runtime
+      # Для удалённого демона задайте здесь или снаружи:
+      # DOCKER_HOST: tcp://remote-host:2376
+      WORKER_IMAGE: audio-worker:2.4.2
+    restart: unless-stopped
+
+  # Образ воркера собирается здесь же; сервис не запускается — контейнеры
+  # воркеров панель создаёт по одному на станцию (имена audio-worker-<id>).
+  worker:
+    build: ./worker
+    image: audio-worker:2.4.2
+    profiles: ["tools"]   # не стартует при обычном up; нужен только для сборки
