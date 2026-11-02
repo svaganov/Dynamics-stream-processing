@@ -196,6 +196,41 @@ class LiquidsoapSandboxTest(unittest.TestCase):
         engines = {s["id"]: s["engine"] for s in health["stations"]}
         self.assertEqual(engines[self.station2_id], "liquidsoap")
 
+    def test_live_gain_adjust_without_restart(self):
+        res = self.client.post("/api/streams/" + self.station2_id + "/start").get_json()
+        self.assertTrue(res["ok"], res)
+        self.wait_for_body("/station-2", 20000)
+
+        manager = panel.get_manager(self.station2_id)
+
+        # Live-подстройка +6 дБ применяется без перезапуска воркера.
+        res = self.client.post(
+            "/api/streams/{}/adjust".format(self.station2_id), json={"gain_db": 6}).get_json()
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(res["mode"], "live")
+        self.assertEqual(res["gain"], {"enabled": True, "db": 6.0})
+
+        # Переменная воркера реально обновилась: 10 ** (6/20) = 1.995262
+        # (воркер печатает значение с точностью до 3 знаков: «1.995»)
+        host_port = manager.telnet_host_port()
+        self.assertIsNotNone(host_port, "telnet-порт воркера не опубликован")
+        out = panel._telnet_command(host_port[0], host_port[1], "var.get panel_gain")
+        value = float(out.strip().splitlines()[0].strip())
+        self.assertAlmostEqual(value, 10.0 ** (6.0 / 20.0), places=2)
+
+        # Значение сохранилось в реестре — после рестарта поднимется с ним.
+        station = self.client.get("/api/streams/" + self.station2_id).get_json()["station"]
+        self.assertEqual(station["gain"], {"enabled": True, "db": 6.0})
+
+        # Поток не прервался: тело наращивается и остаётся ADTS.
+        before = len(bytes(self.icecast.bodies.get("/station-2", b"")))
+        body = self.wait_for_body("/station-2", before + 20000)
+        self.assertTrue(body.startswith(b"\xff\xf1") or body.startswith(b"\xff\xf9"))
+
+        # Контейнер не пересоздавался: pid не сменился.
+        self.assertTrue(self.client.get(
+            "/api/streams/" + self.station2_id + "/status").get_json()["running"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

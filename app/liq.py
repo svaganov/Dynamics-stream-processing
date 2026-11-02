@@ -6,12 +6,20 @@
 монтирует его в контейнер-воркер. Цепочка повторяет FFmpeg-этап:
 EQ (10 полос) → усиление → компрессор → loudnorm (динамический) → лимитер,
 затем AAC (FDK) → Icecast. Метаданные ICY идут сквозь конвейер автоматически.
+
+Усиление вынесено из ffmpeg-графа в amplify(panel_gain(), s): panel_gain —
+интерактивная переменная, поэтому панель может подстраивать громкость
+работающего воркера без перезапуска (telnet: var.set panel_gain = <линейн.>).
 """
 
 EQ_FREQS = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]
 
 # ffmpeg equalizer width_type: 0=h (Гц), 1=q, 2=o (октавы), 3=s (slope), 4=k (кГц)
 EQ_WIDTH_TYPE_OCTAVE = 2
+
+# Telnet-сервер воркера внутри контейнера. Панель публикует порт на 127.0.0.1
+# хоста со случайным портом и находит его через Docker API.
+TELNET_PORT = 1234
 
 
 def db_to_linear(db):
@@ -52,19 +60,6 @@ def _eq_calls(cfg):
     return calls
 
 
-def _gain_call(cfg):
-    gain = cfg.get("gain", {})
-    if not gain.get("enabled"):
-        return None
-    db = float(gain.get("db", 0.0))
-    if abs(db) <= 0.01:
-        return None
-    # volume-фильтр принимает строку с суффиксом dB
-    text = "{:.2f}".format(db).rstrip("0").rstrip(".")
-    sign = "+" if db > 0 else ""
-    return 'ffmpeg.filter.volume(volume="{s}{v}dB", graph, '.format(s=sign, v=text)
-
-
 def _compressor_call(cfg):
     comp = cfg.get("compressor", {})
     if not comp.get("enabled"):
@@ -101,43 +96,96 @@ def _limiter_call(cfg):
     )
 
 
-def _processing_block(cfg):
-    """Возвращает блок обработки (строка) или None для BYPASS."""
-    if cfg.get("bypass"):
-        return None
+def _graph_block(fn_name, title, calls):
+    """Блок ffmpeg.filter.create из вложенных вызовов фильтров.
 
-    calls = []
-    calls += _eq_calls(cfg)
-    gain = _gain_call(cfg)
-    if gain:
-        calls.append(gain)
-    for stage in (_compressor_call(cfg), _loudnorm_call(cfg), _limiter_call(cfg)):
-        if stage:
-            calls.append(stage)
-
+    let-переменные Liquidsoap неизменяемы, поэтому цепочка — matryoshka
+    из вызовов фильтров вокруг a_in. Raw-обёртка источника ожидается снаружи."""
     if not calls:
-        return None  # всё выключено — декод/код без фильтров
-
-    # Граф собираем вложенными вызовами вокруг трека: let-переменные
-    # Liquidsoap неизменяемы, поэтому цепочка — matryoshka из вызовов фильтров.
+        return None
     expr = "a_in"
     for call in calls:
         expr = call + expr + ")"
+    lines = [
+        "# --- {title} ---".format(title=title),
+        "def {fn}(graph) =".format(fn=fn_name),
+        "  let {audio = a_in} = source.tracks(s)",
+        "  a_in = ffmpeg.filter.audio.input(graph, a_in)",
+        "  a_in = " + expr,
+        "  a_in = ffmpeg.filter.audio.output(graph, a_in)",
+        "  source({audio = a_in, metadata = track.metadata(a_in), track_marks = track.track_marks(a_in)})",
+        "end",
+        "s = ffmpeg.filter.create({fn})".format(fn=fn_name),
+    ]
+    return "\n".join(lines)
+
+
+def _gain_block(cfg):
+    """Статическое усиление через amplify с интерактивной переменной panel_gain.
+
+    В отличие от ffmpeg-графа, значение amplify меняется живьём: панель шлёт
+    по telnet «var.set panel_gain = <линейное>» — перезапуск не нужен."""
+    gain = cfg.get("gain") or {}
+    if not gain.get("enabled"):
+        return None
+    db = float(gain.get("db", 0.0))
+    if abs(db) <= 0.01:
+        return None
     return (
-        "# --- цепочка обработки: EQ → gain → comp → loudnorm → limiter ---\n"
-        "# ffmpeg-фильтры работают поверх raw-формата, декодируем в него и обратно\n"
-        "s = ffmpeg.raw.encode.audio(%ffmpeg(%audio.raw), s)\n"
-        "\n"
-        "def dsp_mkfilter(graph) =\n"
-        "  let {audio = a_in} = source.tracks(s)\n"
-        "  a_in = ffmpeg.filter.audio.input(graph, a_in)\n"
-        "  a_in = " + expr + "\n"
-        "  a_in = ffmpeg.filter.audio.output(graph, a_in)\n"
-        "  source({audio = a_in, metadata = track.metadata(a_in), track_marks = track.track_marks(a_in)})\n"
-        "end\n"
-        "s = ffmpeg.filter.create(dsp_mkfilter)\n"
-        "s = ffmpeg.raw.decode.audio(s)"
+        "# --- усиление: amplify(panel_gain(), s) — живьём через telnet ---\n"
+        "s = amplify(panel_gain(), s)"
     )
+
+
+def _processing_block(cfg):
+    """Возвращает блок обработки (строка) или None для BYPASS/пустой цепочки."""
+    if cfg.get("bypass"):
+        return None
+
+    eq_block = _graph_block("eq_mkfilter", "EQ (10 полос)", _eq_calls(cfg))
+    gain_block = _gain_block(cfg)
+    dyn_calls = []
+    for stage in (_compressor_call(cfg), _loudnorm_call(cfg), _limiter_call(cfg)):
+        if stage:
+            dyn_calls.append(stage)
+    dyn_block = _graph_block("dyn_mkfilter", "компрессор → loudnorm → лимитер", dyn_calls)
+
+    if not (eq_block or gain_block or dyn_block):
+        return None  # всё выключено — декод/код без фильтров
+
+    parts = [
+        "# --- цепочка обработки: EQ → усиление (живьём) → компрессор → loudnorm → лимитер ---"
+    ]
+
+    def _raw_wrapped(graph_block, comment):
+        # ffmpeg-фильтры работают поверх raw-формата: encode → граф → decode.
+        # Каждый граф — со своей парой encode/decode: amplify требует PCM-источник
+        # (raw-источник ему не подходит по типам), поэтому усиление живёт
+        # в PCM-домене между двумя raw-графами.
+        return "\n\n".join([
+            "# raw-обёртка: {c}\n"
+            "s = ffmpeg.raw.encode.audio(%ffmpeg(%audio.raw), s)".format(c=comment),
+            graph_block,
+            "s = ffmpeg.raw.decode.audio(s)",
+        ])
+
+    if eq_block:
+        parts.append(_raw_wrapped(eq_block, "EQ-граф"))
+    if gain_block:
+        parts.append(gain_block)
+    if dyn_block:
+        parts.append(_raw_wrapped(dyn_block, "граф динамики"))
+    return "\n\n".join(parts)
+
+
+def _initial_gain_linear(cfg):
+    """Стартовое линейное усиление интерактивной переменной из конфигурации."""
+    gain = cfg.get("gain") or {}
+    if gain.get("enabled"):
+        db = float(gain.get("db", 0.0))
+        if abs(db) > 0.01:
+            return db_to_linear(db)
+    return 1.0
 
 
 def generate_liq_script(cfg):
@@ -150,12 +198,21 @@ def generate_liq_script(cfg):
 
     url = str(src.get("url") or "")
     block = _processing_block(cfg)
+    gain_linear = _initial_gain_linear(cfg)
 
     parts = [
         "# Аудио-воркер Liquidsoap — файл сгенерирован панелью автоматически.",
         "# Станция: {sid}. Ручные правки будут перезаписаны при следующем старте.".format(sid=_liq_string(station_id)),
         "",
         'settings.log.level := 4',
+        "",
+        "# Telnet-сервер управления (панель подстраивает gain живьём)",
+        "settings.server.telnet := true",
+        "settings.server.telnet.port := {port}".format(port=int(TELNET_PORT)),
+        # Внутри контейнера — на всех интерфейсах, иначе Docker не сможет
+        # пробросить порт (default bind 127.0.0.1). Снаружи порт всё равно
+        # публикуется только на 127.0.0.1 хоста (см. DockerWorkerManager).
+        'settings.server.telnet.bind_addr := "0.0.0.0"',
         "",
         'source_url = "{url}"'.format(url=_liq_string(url)),
         "input_s = input.http(",
@@ -174,6 +231,9 @@ def generate_liq_script(cfg):
         '  print("[metadata] " ^ json.stringify(m))',
         "end",
         "s.on_metadata(synchronous=true, panel_log_metadata)",
+        "",
+        "# Интерактивное усиление: живьём по telnet «var.set panel_gain = <линейное>»",
+        'panel_gain = interactive.float("panel_gain", {v})'.format(v=_f(gain_linear)),
         "",
     ]
 

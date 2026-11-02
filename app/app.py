@@ -859,6 +859,32 @@ class ProcessManager:
                 time.sleep(5)
 
 
+def _telnet_command(host, port, command, timeout=4.0):
+    """Одна команда сервера управления Liquidsoap (telnet-протокол).
+
+    Ответы сервера заканчиваются строкой END; служебные IAC-последовательности
+    telnet вырезаются. Возвращает текст ответа."""
+    import socket
+    sock = socket.create_connection((host, int(port)), timeout=timeout)
+    try:
+        sock.settimeout(0.5)
+        try:
+            sock.recv(65536)  # баннер/промпт, если сервер его шлёт
+        except socket.timeout:
+            pass
+        sock.settimeout(timeout)
+        sock.sendall(command.encode("utf-8") + b"\r\n")
+        buf = b""
+        while b"END" not in buf:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            buf += chunk
+    finally:
+        sock.close()
+    return re.sub(rb"\xff...", b"", buf).decode("utf-8", "replace")
+
+
 class DockerWorkerManager:
     """Менеджер станции на движке Liquidsoap: один Docker-контейнер на станцию.
 
@@ -962,6 +988,9 @@ class DockerWorkerManager:
                 )],
                 labels={"audio-panel": "1", "audio-panel.station": self.station_id},
                 extra_hosts={"host.docker.internal": "host-gateway"},
+                # Telnet-сервер управления: на хосте доступен только с 127.0.0.1
+                # на случайном порту — панель находит его через Docker API.
+                ports={"{}/tcp".format(liq.TELNET_PORT): ("127.0.0.1", None)},
             )
             container.start()
         except Exception as exc:
@@ -1007,6 +1036,54 @@ class DockerWorkerManager:
             return False, "нет конфигурации станции"
         ok, msg = self.start(next_cfg)
         return ok, ("перезапущен" if ok else msg)
+
+    def telnet_host_port(self):
+        """(host, port) опубликованного на хосте telnet-порта воркера или None."""
+        if os.environ.get("DOCKER_HOST"):
+            # порт мапится на удалённом хосте — из панели живьём не достичь
+            return None
+        with self.lock:
+            container = self.container
+        if container is None:
+            return None
+        try:
+            container.reload()
+            bindings = (container.attrs.get("NetworkSettings", {}).get("Ports") or {}).get(
+                "{}/tcp".format(liq.TELNET_PORT)) or []
+        except Exception:
+            return None
+        if not bindings:
+            return None
+        host = bindings[0].get("HostIp") or "127.0.0.1"
+        if host in ("", "0.0.0.0", "::"):
+            host = "127.0.0.1"
+        port = bindings[0].get("HostPort")
+        if not port:
+            return None
+        return host, int(port)
+
+    def adjust_gain(self, db):
+        """Живая подстройка усиления через telnet воркера (без перезапуска)."""
+        db = max(-24.0, min(24.0, float(db)))
+        with self.lock:
+            container = self.container
+        if container is None or not self._is_running(container):
+            return False, "воркер не запущен"
+        host_port = self.telnet_host_port()
+        if host_port is None:
+            return False, "telnet-порт воркера недоступен (удалённый демон Docker?)"
+        linear = 10.0 ** (db / 20.0)
+        try:
+            out = _telnet_command(host_port[0], host_port[1],
+                                  "var.set panel_gain = {:.6f}".format(linear))
+        except Exception as exc:
+            return False, "telnet: {}".format(exc)
+        lines = out.strip().splitlines()
+        # Успех: «Variable panel_gain set.»; неудача — «Syntax error or variable
+        # not found.» и др. — единый признак: слово «error» в первой строке.
+        if lines and "error" in lines[0].lower():
+            return False, lines[0]
+        return True, "подстроено живьём: {:+g} дБ".format(db)
 
     def dispose(self):
         """Остановка + удаление контейнера (при смене движка или удалении станции)."""
@@ -1360,6 +1437,32 @@ def api_station_command(station_id):
         return jsonify({"cmd": [], "text": liq.mask_liq_script(script, station)})
     cmd = build_command(station_runtime_config(station, settings))
     return jsonify({"cmd": masked_command(cmd), "text": " ".join(masked_command(cmd))})
+
+
+@app.route("/api/streams/<station_id>/adjust", methods=["POST"])
+def api_station_adjust(station_id):
+    """Живая подстройка работающего воркера (пока — усиления, без перезапуска)."""
+    station = get_station(station_id)
+    if station is None:
+        return _station_not_found()
+    body = request.get_json(silent=True) or {}
+    if "gain_db" not in body:
+        return jsonify({"ok": False, "error": "укажите gain_db"}), 400
+    try:
+        gain_db = float(body["gain_db"])
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "gain_db должен быть числом"}), 400
+    if station.get("engine") != "liquidsoap":
+        return jsonify({
+            "ok": False,
+            "error": "живая подстройка доступна только для движка Liquidsoap — "
+                     "для FFmpeg изменения применяются при перезапуске",
+        }), 409
+    ok, msg = get_manager(station_id).adjust_gain(gain_db)
+    if not ok:
+        return jsonify({"ok": False, "error": msg}), 409
+    updated = update_station(station_id, {"gain": {"enabled": True, "db": gain_db}})
+    return jsonify({"ok": True, "mode": "live", "message": msg, "gain": updated["gain"]})
 
 
 @app.route("/api/health", methods=["GET"])

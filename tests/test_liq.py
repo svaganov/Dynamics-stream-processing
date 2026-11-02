@@ -41,16 +41,26 @@ def make_cfg(**overrides):
 class LiqGeneratorTest(unittest.TestCase):
     def test_full_chain_order_and_params(self):
         script = liq.generate_liq_script(make_cfg())
-        # порядок вложенных вызовов: alimiter(... loudnorm(... acompressor(... volume(... equalizer(...))))
-        pos_lim = script.index("ffmpeg.filter.alimiter")
-        pos_ln = script.index("ffmpeg.filter.loudnorm")
-        pos_comp = script.index("ffmpeg.filter.acompressor")
-        pos_vol = script.index('ffmpeg.filter.volume(volume="+2.5dB"')
+        # telnet-сервер управления поднят, усиление — интерактивная переменная
+        self.assertIn("settings.server.telnet := true", script)
+        self.assertIn("settings.server.telnet.port := 1234", script)
+        # bind внутри контейнера — 0.0.0.0, иначе Docker не пробросит порт
+        self.assertIn('settings.server.telnet.bind_addr := "0.0.0.0"', script)
+        # 2.5 дБ -> линейное усиление 10 ** (2.5/20) = 1.333521
+        self.assertIn('panel_gain = interactive.float("panel_gain", 1.333521)', script)
+        # порядок: EQ-граф (raw) → amplify (PCM) → граф динамики (raw);
+        # у каждого графа своя пара encode/decode
+        pos_raw = script.index("ffmpeg.raw.encode.audio")
         pos_eq = script.index("ffmpeg.filter.equalizer(f=31")
-        self.assertLess(pos_lim, pos_ln)
-        self.assertLess(pos_ln, pos_comp)
-        self.assertLess(pos_comp, pos_vol)
-        self.assertLess(pos_vol, pos_eq)
+        pos_amp = script.index("s = amplify(panel_gain(), s)")
+        pos_comp = script.index("ffmpeg.filter.acompressor")
+        pos_dec = script.rindex("ffmpeg.raw.decode.audio")
+        self.assertEqual(script.count("ffmpeg.raw.encode.audio"), 2)
+        self.assertEqual(script.count("ffmpeg.raw.decode.audio"), 2)
+        self.assertLess(pos_raw, pos_eq)
+        self.assertLess(pos_eq, pos_amp)
+        self.assertLess(pos_amp, pos_comp)
+        self.assertLess(pos_comp, pos_dec)
         # пороги/makeup переведены из dB в линейные
         self.assertIn("threshold=0.1", script)
         self.assertIn("makeup=1.995262", script)
@@ -71,6 +81,7 @@ class LiqGeneratorTest(unittest.TestCase):
         script = liq.generate_liq_script(make_cfg(bypass=True))
         self.assertNotIn("ffmpeg.filter", script)
         self.assertNotIn("ffmpeg.raw", script)
+        self.assertNotIn("amplify", script)
         self.assertIn("output.icecast", script)
 
     def test_all_disabled_equals_no_filter_block(self):
@@ -81,6 +92,25 @@ class LiqGeneratorTest(unittest.TestCase):
                        limiter={"enabled": False})
         script = liq.generate_liq_script(cfg)
         self.assertNotIn("ffmpeg.filter.create", script)
+        self.assertNotIn("amplify", script)
+        # интерактивная переменная всё равно регистрируется (стартовое 1.0)
+        self.assertIn('interactive.float("panel_gain", 1.0)', script)
+
+    def test_gain_only_uses_amplify_without_raw_graph(self):
+        cfg = make_cfg(equalizer={"enabled": False, "gains": [0] * 10},
+                       compressor={"enabled": False},
+                       loudnorm={"enabled": False},
+                       limiter={"enabled": False})
+        script = liq.generate_liq_script(cfg)
+        self.assertIn("s = amplify(panel_gain(), s)", script)
+        self.assertNotIn("ffmpeg.filter.create", script)
+        self.assertNotIn("ffmpeg.raw", script)
+
+    def test_disabled_gain_initializes_panel_gain_to_one(self):
+        cfg = make_cfg(gain={"enabled": True, "db": 0})
+        script = liq.generate_liq_script(cfg)
+        self.assertNotIn("amplify", script)
+        self.assertIn('interactive.float("panel_gain", 1.0)', script)
 
     def test_password_masked(self):
         cfg = make_cfg()

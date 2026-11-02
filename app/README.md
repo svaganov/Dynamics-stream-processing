@@ -99,7 +99,7 @@ docker compose up -d --build
 input.http (max_buffer 10 c, reconnect)                       приём + декод
   → ffmpeg.raw.encode.audio (%ffmpeg(%audio.raw))             обёртка в raw-граф
   → ffmpeg.filter.equalizer  ×10 полос                        EQ
-  → ffmpeg.filter.volume  «+NdB» (опционально)                усиление
+  → amplify(panel_gain(), s) (опционально)                   усиление, live
   → ffmpeg.filter.acompressor (linear threshold/makeup)       компрессор
   → ffmpeg.filter.loudnorm (i/tp/lra, linear=false)           LUFS, динамический режим
   → ffmpeg.filter.alimiter (linear ceiling)                   лимитер
@@ -121,7 +121,30 @@ input.http (max_buffer 10 c, reconnect)                       приём + де�
 
 Изоляция: каждый воркер — отдельный контейнер со своим watchdog, логом, счётчиком
 рестартов и своим BYPASS. Открытых портов у воркера нет: он тянет источник снаружи
-и пушит на Icecast наружу.
+и пушит на Icecast наружу. Единственное исключение — telnet-сервер управления
+Liquidsoap: `settings.server.telnet` на порту 1234, публикуется на хосте строго
+на `127.0.0.1` со случайным портом (панель находит его через Docker API).
+
+## Живая подстройка усиления (Liquidsoap, без перезапуска)
+
+В сгенерированном скрипте усиление — интерактивная переменная
+`panel_gain = interactive.float("panel_gain", <линейное>)`, применяемая через
+`amplify(panel_gain(), s)` после EQ и до компрессора. Кнопка **«⚡ Живьём»**
+в карточке «02 Эквалайзер» шлёт:
+
+```text
+POST /api/streams/<id>/adjust      {"gain_db": 3.0}
+  → 200 {"ok": true, "mode": "live", "gain": {"enabled": true, "db": 3.0}}
+  → 409 (движок FFmpeg / воркер не запущен / ошибка telnet), 400 (нет gain_db)
+```
+
+Панель переводит дБ в линейное (`10^(dB/20)`, диапазон ±24 дБ) и выполняет
+`var.set panel_gain = <линейное>` по telnet; значение одновременно сохраняется
+в `streams.json`, чтобы рестарт поднялся с ним. Ограничения:
+
+- только движок `liquidsoap`; для FFmpeg изменения применяются при перезапуске;
+- работает только при локальном демоне Docker: при `DOCKER_HOST` порт мапится
+  на удалённом хосте и живьём не достичь — API вернёт 409.
 
 ## Реестр станций
 
@@ -201,8 +224,8 @@ python tests\sandbox_liquidsoap.py     :: Этап 2: FFmpeg-станция + Li
   (`GET /admin/metadata?mount=…&mode=updinfo&song=…`), т.к. FFmpeg при выходе `-f adts`
   не вставляет динамические in-band метаданные. У Liquidsoap-воркеров метаданные идут
   сквозь конвейер автоматически и публикуются клиентом `output.icecast` самим сервером.
-- Telnet API воркера (живая подстройка без перезапуска) в брифе заявлен, в текущей
-  версии не поднят — задел на следующий этап.
+- Telnet API воркера поднят: живая подстройка усиления работающего воркера
+  (`POST /api/streams/<id>/adjust`, кнопка «⚡ Живьём») — см. раздел выше.
 - В песочнице Liquidsoap-потребление источника идёт быстрее realtime
   (авто-синхронизация под медленный источник не срабатывает) — компенсируется
   троттлингом источника в тесте. Против реального Icecast проверено не было.

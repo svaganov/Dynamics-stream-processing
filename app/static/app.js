@@ -33,6 +33,7 @@ let currentStationId = null;
 let healthById = new Map();
 let logCursors = new Map();
 let lastHealth = { counts: { running: 0, stopped: 0 }, stations: [] };
+let currentRunning = false; // работает ли выбранная станция (последний poll)
 
 function selectedStation() {
   return currentStationId ? stationMap.get(currentStationId) || null : null;
@@ -239,6 +240,7 @@ function syncCardState() {
   $("cardCompressor").classList.toggle("disabled", bypass || !$("comp_enabled").checked);
   $("cardLoudnorm").classList.toggle("disabled", bypass || !$("ln_enabled").checked);
   $("cardLimiter").classList.toggle("disabled", bypass || !$("lim_enabled").checked);
+  syncGainLive();
 }
 
 /* ---------- right panel: chain + urls ---------- */
@@ -586,9 +588,44 @@ function updateSelectedStatus(status) {
         : "НЕ НАЙДЕН");
   $("rpFfmpeg").style.color = status && (status.ffmpeg_found || isLiquidsoap) ? "" : "var(--red)";
   const running = Boolean(status && status.running);
+  currentRunning = running;
   $("btnStart").disabled = !station || running;
   $("btnStop").disabled = !station || !running;
+  syncGainLive();
 }
+
+/* Живая подстройка (telnet воркера) доступна только для работающей
+   Liquidsoap-станции; для FFmpeg изменения применяются при перезапуске. */
+function syncGainLive() {
+  const engine = $("engine").value;
+  const enabled = engine === "liquidsoap" && currentRunning;
+  $("btnGainLive").disabled = !enabled;
+  $("btnGainLive").title = enabled
+    ? "Мгновенно применить к работающему воркеру (без перезапуска)"
+    : "Доступно для работающей станции с движком Liquidsoap — иначе применится при перезапуске";
+}
+
+$("btnGainLive").addEventListener("click", async () => {
+  if (!currentStationId) return;
+  if (!$("gain_enabled").checked) {
+    toast("Сначала включите усиление", true);
+    return;
+  }
+  const db = parseFloat($("gain_db").value);
+  try {
+    const res = await fetch("/api/streams/" + encodeURIComponent(currentStationId) + "/adjust", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ gain_db: db }),
+    });
+    const data = await res.json();
+    toast(data.ok
+      ? "Применено живьём: " + (db > 0 ? "+" : "") + db + " dB"
+      : (data.error || "Не удалось подстроить"), !data.ok);
+  } catch (e) {
+    toast("Не удалось подстроить", true);
+  }
+});
 
 async function pollHealth() {
   try {

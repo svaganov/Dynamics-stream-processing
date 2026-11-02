@@ -74,6 +74,23 @@ class FakeProc:
         self.finished = True
 
 
+class FakeLiquidsoapContainer:
+    """Эмуляция запущенного Docker-контейнера воркера Liquidsoap."""
+
+    def __init__(self, host_ip="127.0.0.1", host_port="55999"):
+        self.status = "running"
+        self.attrs = {
+            "NetworkSettings": {
+                "Ports": {
+                    "1234/tcp": [{"HostIp": host_ip, "HostPort": host_port}],
+                },
+            },
+        }
+
+    def reload(self):
+        pass
+
+
 class PanelApiTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -193,6 +210,65 @@ class PanelApiTest(unittest.TestCase):
             "gain": {"enabled": True, "db": 40},
         }).get_json()["station"]
         self.assertEqual(updated["gain"]["db"], 24.0)
+
+    def test_adjust_requires_gain_db(self):
+        res = self.client.post("/api/streams/station-1/adjust", json={})
+        self.assertEqual(res.status_code, 400)
+        res = self.client.post("/api/streams/station-1/adjust", json={"gain_db": "abc"})
+        self.assertEqual(res.status_code, 400)
+        res = self.client.post("/api/streams/station-1/adjust", json={"gain_db": None})
+        self.assertEqual(res.status_code, 400)
+
+    def test_adjust_rejected_for_ffmpeg_engine(self):
+        res = self.client.post("/api/streams/station-1/adjust", json={"gain_db": 3.0})
+        self.assertEqual(res.status_code, 409)
+        self.assertIn("liquidsoap", res.get_json()["error"].lower())
+
+    def test_adjust_rejected_when_worker_not_running(self):
+        res = self.client.post("/api/streams", json={"name": "Радио LQ", "engine": "liquidsoap"})
+        station_id = res.get_json()["station"]["id"]
+        self.assertEqual(res.get_json()["station"]["engine"], "liquidsoap")
+
+        res = self.client.post("/api/streams/{}/adjust".format(station_id), json={"gain_db": 3.0})
+        self.assertEqual(res.status_code, 409)
+        self.assertIn("не запущен", res.get_json()["error"])
+
+    def test_adjust_sends_telnet_command_and_persists_gain(self):
+        res = self.client.post("/api/streams", json={"name": "Радио LQ", "engine": "liquidsoap"})
+        station_id = res.get_json()["station"]["id"]
+        manager = panel.get_manager(station_id)
+        manager.container = FakeLiquidsoapContainer()
+
+        with mock.patch.object(panel, "_telnet_command", return_value="OK\nEND") as tel:
+            res = self.client.post(
+                "/api/streams/{}/adjust".format(station_id), json={"gain_db": 3.0})
+
+        self.assertEqual(res.status_code, 200)
+        data = res.get_json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["mode"], "live")
+        self.assertEqual(data["gain"], {"enabled": True, "db": 3.0})
+        # 3 дБ -> линейное усиление 10 ** (3/20) = 1.412538
+        tel.assert_called_once_with("127.0.0.1", 55999, "var.set panel_gain = 1.412538")
+
+        # Значение усиления сохранилось в реестре станции.
+        station = self.client.get("/api/streams/" + station_id).get_json()["station"]
+        self.assertTrue(station["gain"]["enabled"])
+        self.assertEqual(station["gain"]["db"], 3.0)
+
+    def test_adjust_reports_telnet_error(self):
+        res = self.client.post("/api/streams", json={"name": "Радио LQ", "engine": "liquidsoap"})
+        station_id = res.get_json()["station"]["id"]
+        manager = panel.get_manager(station_id)
+        manager.container = FakeLiquidsoapContainer()
+
+        # Liquidsoap сообщает об ошибке строкой «Syntax error or variable not found.»
+        with mock.patch.object(panel, "_telnet_command",
+                               return_value="Syntax error or variable not found.\nEND"):
+            res = self.client.post(
+                "/api/streams/{}/adjust".format(station_id), json={"gain_db": -2.0})
+        self.assertEqual(res.status_code, 409)
+        self.assertIn("error", res.get_json()["error"].lower())
 
     def test_process_isolation_and_autorestart(self):
         res = self.client.post("/api/streams", json={"name": "Радио 2"})
