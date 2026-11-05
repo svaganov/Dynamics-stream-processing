@@ -366,6 +366,70 @@ class PanelApiTest(unittest.TestCase):
         self.assertTrue(station["equalizer"]["enabled"])
         self.assertEqual(station["equalizer"]["gains"], gains)
 
+    def test_adjust_compressor_sends_telnet_vars_and_persists(self):
+        station_id, _ = self._make_running_liquidsoap_station()
+        with mock.patch.object(panel, "_telnet_session",
+                               return_value=["OK\nEND"] * 5) as sess:
+            res = self.client.post(
+                "/api/streams/{}/adjust".format(station_id),
+                json={"compressor": {"threshold": -24, "ratio": 6,
+                                     "attack": 3, "release": 200, "makeup": 4}})
+        self.assertEqual(res.status_code, 200)
+        data = res.get_json()
+        self.assertTrue(data["ok"])
+        commands = sess.call_args[0][2]
+        self.assertEqual(len(commands), 5)
+        self.assertIn("var.set panel_comp_threshold = -24.0", commands)
+        self.assertIn("var.set panel_comp_ratio = 6.0", commands)
+        self.assertIn("var.set panel_comp_makeup = 4.0", commands)
+        station = self.client.get("/api/streams/" + station_id).get_json()["station"]
+        self.assertTrue(station["compressor"]["enabled"])
+        self.assertEqual(station["compressor"]["threshold"], -24.0)
+        self.assertEqual(station["compressor"]["ratio"], 6.0)
+
+    def test_bind_source_mapping_for_containerized_panel(self):
+        # Панель в контейнере: bind source резолвится демоном на хосте, поэтому
+        # WORKER_BIND_ROOT переносит относительный путь скрипта на хостовый корень.
+        with mock.patch.object(panel, "WORKER_BIND_ROOT",
+                               r"D:\proj\data\runtime"):
+            with mock.patch.object(panel, "RUNTIME_DIR", "/data/runtime"):
+                src = panel.DockerWorkerManager._bind_source(
+                    "/data/runtime/station-1/station.liq")
+        self.assertEqual(src, os.path.join(r"D:\proj\data\runtime",
+                                           "station-1", "station.liq"))
+        # без WORKER_BIND_ROOT путь возвращается как есть (панель на хосте)
+        with mock.patch.object(panel, "WORKER_BIND_ROOT", ""):
+            self.assertEqual(
+                panel.DockerWorkerManager._bind_source("/x/station.liq"),
+                "/x/station.liq")
+
+    def test_adjust_limiter_clamps_and_persists(self):
+        station_id, _ = self._make_running_liquidsoap_station()
+        with mock.patch.object(panel, "_telnet_session",
+                               return_value=["OK\nEND"] * 3) as sess:
+            res = self.client.post(
+                "/api/streams/{}/adjust".format(station_id),
+                json={"limiter": {"ceiling_db": 5, "attack": 1, "release": 50}})
+        self.assertEqual(res.status_code, 200)
+        commands = sess.call_args[0][2]
+        self.assertEqual(len(commands), 3)
+        # потолок клампится к 0 дБ (верх границы)
+        self.assertIn("var.set panel_lim_ceiling = 0.0", commands)
+        station = self.client.get("/api/streams/" + station_id).get_json()["station"]
+        self.assertTrue(station["limiter"]["enabled"])
+        self.assertEqual(station["limiter"]["ceiling_db"], 0.0)
+
+    def test_adjust_compressor_validation(self):
+        station_id, _ = self._make_running_liquidsoap_station()
+        res = self.client.post(
+            "/api/streams/{}/adjust".format(station_id),
+            json={"compressor": {"threshold": "громко"}})
+        self.assertEqual(res.status_code, 400)
+        res = self.client.post(
+            "/api/streams/{}/adjust".format(station_id),
+            json={"limiter": [-1, 5, 50]})
+        self.assertEqual(res.status_code, 400)
+
     def test_process_isolation_and_autorestart(self):
         res = self.client.post("/api/streams", json={"name": "Радио 2"})
         station2_id = res.get_json()["station"]["id"]

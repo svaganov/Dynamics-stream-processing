@@ -104,6 +104,13 @@ class LiquidsoapSandboxTest(unittest.TestCase):
             "autorestart": {"enabled": False, "delay": 1},
             "gain": {"enabled": True, "db": 0.0},
             "equalizer": {"enabled": True, "gains": [2, 0, 0, 0, 1, 0, 0, 0, 0, 0]},
+            # Полная цепочка динамики: нативные compress/limit (живые геттеры)
+            # вокруг ffmpeg-графа loudnorm — рантайм-проверка clock-стыковки
+            # (buffer после raw.decode перед нативным лимитером).
+            "compressor": {"enabled": True, "threshold": -20, "ratio": 4,
+                           "attack": 5, "release": 120, "makeup": 0},
+            "loudnorm": {"enabled": True, "i": -14, "tp": -1.5, "lra": 11},
+            "limiter": {"enabled": True, "ceiling_db": -1.0, "attack": 5, "release": 50},
         })
 
     def tearDown(self):
@@ -303,6 +310,45 @@ class LiquidsoapSandboxTest(unittest.TestCase):
         station = self.client.get("/api/streams/" + self.station2_id).get_json()["station"]
         self.assertTrue(station["equalizer"]["enabled"])
         self.assertEqual(station["equalizer"]["gains"], gains)
+
+        # Поток не прервался: тело наращивается и остаётся ADTS.
+        before = len(bytes(self.icecast.bodies.get("/station-2", b"")))
+        body = self.wait_for_body("/station-2", before + 20000)
+        self.assertTrue(body.startswith(b"\xff\xf1") or body.startswith(b"\xff\xf9"))
+
+    def test_live_dyn_adjust_without_restart(self):
+        res = self.client.post("/api/streams/" + self.station2_id + "/start").get_json()
+        self.assertTrue(res["ok"], res)
+        # Полная цепочка (compress → loudnorm-граф → limit) работает в рантайме:
+        # тело копится — иначе clock-стыковка графа с нативными операторами
+        # уже уронила бы воркер.
+        self.wait_for_body("/station-2", 20000)
+
+        manager = panel.get_manager(self.station2_id)
+
+        # Живьём меняем порог компрессора и потолок лимитера одним запросом.
+        res = self.client.post(
+            "/api/streams/{}/adjust".format(self.station2_id),
+            json={"compressor": {"threshold": -30, "ratio": 6,
+                                 "attack": 3, "release": 200, "makeup": 2},
+                  "limiter": {"ceiling_db": -3, "attack": 2, "release": 80}}).get_json()
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(res["mode"], "live")
+
+        host_port = manager.telnet_host_port()
+        self.assertIsNotNone(host_port, "telnet-порт воркера не опубликован")
+        # воркер печатает значения с точностью до 3 знаков
+        out = panel._telnet_command(host_port[0], host_port[1], "var.get panel_comp_threshold")
+        self.assertAlmostEqual(float(out.strip().splitlines()[0].strip()), -30.0, places=2)
+        out = panel._telnet_command(host_port[0], host_port[1], "var.get panel_comp_ratio")
+        self.assertAlmostEqual(float(out.strip().splitlines()[0].strip()), 6.0, places=2)
+        out = panel._telnet_command(host_port[0], host_port[1], "var.get panel_lim_ceiling")
+        self.assertAlmostEqual(float(out.strip().splitlines()[0].strip()), -3.0, places=2)
+
+        # Значения сохранились в реестре.
+        station = self.client.get("/api/streams/" + self.station2_id).get_json()["station"]
+        self.assertEqual(station["compressor"]["threshold"], -30.0)
+        self.assertEqual(station["limiter"]["ceiling_db"], -3.0)
 
         # Поток не прервался: тело наращивается и остаётся ADTS.
         before = len(bytes(self.icecast.bodies.get("/station-2", b"")))

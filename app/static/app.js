@@ -695,6 +695,53 @@ $("gain_db").addEventListener("input", () => {
   }, 400);
 });
 
+/* Автоприменение динамики: для работающей Liquidsoap-станции движение
+   ползунков компрессора/лимитера само шлёт живую подстройку (с задержкой
+   после остановки, одним запросом на оба блока). Loudnorm не шлём — у него
+   нет живого эквивалента, он применяется при перезапуске воркера. */
+let dynLiveTimer = null;
+function scheduleDynLive() {
+  if (!currentStationId) return;
+  if ($("engine").value !== "liquidsoap" || !currentRunning) return;
+  clearTimeout(dynLiveTimer);
+  dynLiveTimer = setTimeout(async () => {
+    const body = {};
+    if ($("comp_enabled").checked) {
+      body.compressor = {
+        threshold: parseFloat($("comp_threshold").value),
+        ratio: parseFloat($("comp_ratio").value),
+        attack: parseFloat($("comp_attack").value),
+        release: parseFloat($("comp_release").value),
+        makeup: parseFloat($("comp_makeup").value),
+      };
+    }
+    if ($("lim_enabled").checked) {
+      body.limiter = {
+        ceiling_db: parseFloat($("lim_ceiling_db").value),
+        attack: parseFloat($("lim_attack").value),
+        release: parseFloat($("lim_release").value),
+      };
+    }
+    if (!body.compressor && !body.limiter) return;
+    try {
+      const res = await fetch("/api/streams/" + encodeURIComponent(currentStationId) + "/adjust", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (!data.ok) toast(data.error || "Не удалось подстроить динамику", true);
+    } catch (e) {
+      toast("Не удалось подстроить динамику", true);
+    }
+  }, 400);
+}
+
+for (const id of ["comp_threshold", "comp_ratio", "comp_attack", "comp_release",
+                  "comp_makeup", "lim_ceiling_db", "lim_attack", "lim_release"]) {
+  $(id).addEventListener("input", scheduleDynLive);
+}
+
 /* Живой BYPASS: для работающей Liquidsoap-станции переключатель шлёт
    telnet-команду воркеру сразу; иначе значение применится при перезапуске. */
 $("bypass").addEventListener("change", async () => {

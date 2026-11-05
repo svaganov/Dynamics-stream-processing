@@ -48,36 +48,81 @@ class LiqGeneratorTest(unittest.TestCase):
         self.assertIn('settings.server.telnet.bind_addr := "0.0.0.0"', script)
         # 2.5 дБ -> линейное усиление 10 ** (2.5/20) = 1.333521
         self.assertIn('panel_gain = interactive.float("panel_gain", 1.333521)', script)
-        # порядок: EQ (нативные IIR-пики, PCM) → amplify (PCM) → граф динамики
-        # (raw-обёртка одна — только ffmpeg-фильтры); ветка proc, выход — switch
+        # порядок: EQ (нативные IIR-пики, PCM) → amplify (PCM) → compress (PCM,
+        # живые геттеры) → raw-обёртка loudnorm (единственный ffmpeg-фильтр) →
+        # buffer (развод clock) → limit (PCM, живые геттеры); ветка proc,
+        # выход — switch на panel_bypass
         pos_eq = script.index("filter.iir.eq.peak(frequency=31")
         pos_amp = script.index("proc = amplify(panel_gain, proc)")
+        pos_comp = script.index("compress(threshold=panel_comp_threshold")
         pos_raw = script.index("ffmpeg.raw.encode.audio")
-        pos_comp = script.index("ffmpeg.filter.acompressor")
-        pos_dec = script.rindex("ffmpeg.raw.decode.audio")
+        pos_ln = script.index("ffmpeg.filter.loudnorm")
+        pos_dec = script.index("ffmpeg.raw.decode.audio")
+        pos_buf = script.index("proc = buffer(proc)")
+        pos_lim = script.index("limit(threshold=panel_lim_ceiling")
         self.assertEqual(script.count("ffmpeg.raw.encode.audio"), 1)
         self.assertEqual(script.count("ffmpeg.raw.decode.audio"), 1)
         self.assertLess(pos_eq, pos_amp)
-        self.assertLess(pos_amp, pos_raw)
-        self.assertLess(pos_raw, pos_comp)
-        self.assertLess(pos_comp, pos_dec)
+        self.assertLess(pos_amp, pos_comp)
+        self.assertLess(pos_comp, pos_raw)
+        self.assertLess(pos_raw, pos_ln)
+        self.assertLess(pos_ln, pos_dec)
+        self.assertLess(pos_dec, pos_buf)
+        self.assertLess(pos_buf, pos_lim)
         # live-BYPASS: интерактивная переменная + switch «вход ↔ обработка»
         self.assertIn('panel_bypass = interactive.bool("panel_bypass", false)', script)
         pos_switch = script.index("s = switch(track_sensitive=false, [")
-        self.assertLess(pos_dec, pos_switch)
+        self.assertLess(pos_lim, pos_switch)
         self.assertIn("(panel_bypass, s)", script)
         self.assertIn("({not panel_bypass()}, buffer(proc))", script)
-        # пороги/makeup переведены из dB в линейные
-        self.assertIn("threshold=0.1", script)
-        self.assertIn("makeup=1.995262", script)
-        self.assertIn("limit=0.891251", script)
-        # loudnorm — динамический режим; у лимитера авто-подъём отключен
+        # динамика больше НЕ в ffmpeg-графе: acompressor/alimiter заменены
+        # нативными compress/limit с геттерами
+        self.assertNotIn("ffmpeg.filter.acompressor", script)
+        self.assertNotIn("ffmpeg.filter.alimiter", script)
+        self.assertIn("gain=panel_comp_makeup", script)
+        # loudnorm — динамический режим ffmpeg-графа
         self.assertIn("linear=false", script)
-        self.assertIn("level=false, graph", script)
+        # стартовые значения интерактивных переменных динамики из конфигурации
+        self.assertIn('panel_comp_threshold = interactive.float("panel_comp_threshold", -20.0)', script)
+        self.assertIn('panel_comp_ratio = interactive.float("panel_comp_ratio", 4.0)', script)
+        self.assertIn('panel_comp_makeup = interactive.float("panel_comp_makeup", 6.0)', script)
+        self.assertIn('panel_lim_ceiling = interactive.float("panel_lim_ceiling", -1.0)', script)
+        self.assertIn('panel_lim_release = interactive.float("panel_lim_release", 50.0)', script)
         # выход на Icecast с FDK-AAC
         self.assertIn('host="ice.example"', script)
         self.assertIn("mount=\"/radio7\"", script)
         self.assertIn("%fdkaac(channels=2, samplerate=44100, bitrate=128", script)
+
+    def test_comp_limit_without_loudnorm_has_no_raw_graph(self):
+        # компрессор + лимитер нативные (PCM-домен): без loudnorm ffmpeg-граф
+        # и raw-обёртка не нужны вовсе
+        cfg = make_cfg(loudnorm={"enabled": False})
+        script = liq.generate_liq_script(cfg)
+        self.assertNotIn("ffmpeg.filter", script)
+        self.assertNotIn("ffmpeg.raw", script)
+        self.assertIn("compress(threshold=panel_comp_threshold", script)
+        self.assertIn("limit(threshold=panel_lim_ceiling", script)
+
+    def test_compressor_only_chain(self):
+        cfg = make_cfg(equalizer={"enabled": False, "gains": [0] * 10},
+                       gain={"enabled": False, "db": 0},
+                       loudnorm={"enabled": False},
+                       limiter={"enabled": False})
+        script = liq.generate_liq_script(cfg)
+        self.assertIn("proc = compress(threshold=panel_comp_threshold", script)
+        self.assertNotIn("limit(", script)
+        self.assertNotIn("ffmpeg.filter", script)
+
+    def test_limiter_only_chain(self):
+        cfg = make_cfg(equalizer={"enabled": False, "gains": [0] * 10},
+                       gain={"enabled": False, "db": 0},
+                       compressor={"enabled": False},
+                       loudnorm={"enabled": False})
+        script = liq.generate_liq_script(cfg)
+        self.assertIn("proc = limit(threshold=panel_lim_ceiling", script)
+        self.assertNotIn("compress(", script)
+        self.assertNotIn("panel_comp_", script)
+        self.assertNotIn("ffmpeg.filter", script)
 
     def test_all_eq_bands_interactive(self):
         script = liq.generate_liq_script(make_cfg())
@@ -92,15 +137,25 @@ class LiqGeneratorTest(unittest.TestCase):
         self.assertIn('panel_eq_1000 = interactive.float("panel_eq_1000", 0.0)', script)
 
     def test_live_params_passed_as_getters_not_calls(self):
-        # Регрессия «значение запеклось при старте»: amplify и IIR-пики EQ
-        # принимают геттеры () -> float — передаём саму функцию, не вызов.
-        # Вызов panel_gain() «запек» бы значение на момент старта воркера,
-        # и живые подстройки telnet'ом перестали бы доходить до звука.
+        # Регрессия «значение запеклось при старте»: amplify, IIR-пики EQ,
+        # compress и limit принимают геттеры () -> float — передаём саму функцию,
+        # не вызов. Вызов panel_gain() «запек» бы значение на момент старта
+        # воркера, и живые подстройки telnet'ом перестали бы доходить до звука.
         script = liq.generate_liq_script(make_cfg())
         self.assertIn("amplify(panel_gain, ", script)
         self.assertNotIn("amplify(panel_gain(), ", script)
         self.assertIn("gain=panel_eq_31,", script)
         self.assertNotIn("panel_eq_31()", script)
+        # динамика: параметры-геттеры, не вызовы
+        self.assertIn("threshold=panel_comp_threshold", script)
+        self.assertIn("ratio=panel_comp_ratio", script)
+        self.assertIn("gain=panel_comp_makeup", script)
+        self.assertIn("threshold=panel_lim_ceiling", script)
+        for name in ("panel_comp_threshold", "panel_comp_ratio",
+                     "panel_comp_attack", "panel_comp_release",
+                     "panel_comp_makeup", "panel_lim_ceiling",
+                     "panel_lim_attack", "panel_lim_release"):
+            self.assertNotIn(name + "(", script)
 
     def test_eq_disabled_has_no_interactive_bands(self):
         cfg = make_cfg(equalizer={"enabled": False, "gains": [1] * 10})

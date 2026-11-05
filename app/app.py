@@ -39,7 +39,18 @@ INDEX_PATH = os.path.join(BASE_DIR, "static", "index.html")
 # лежат в WORKER_RUNTIME_DIR — путь должен быть виден демону Docker
 # (в compose это хостовый том, на dev-хосте Windows — обычная папка проекта).
 RUNTIME_DIR = os.environ.get("WORKER_RUNTIME_DIR") or os.path.join(BASE_DIR, "runtime")
+# Панель в контейнере видит рантайм-каталог по своему пути (например,
+# /data/runtime), а демон Docker резолвит bind source на хосте. Если пути не
+# совпадают, задают WORKER_BIND_ROOT — хостовый путь того же каталога
+# (на Linux-хосте с монтированием /data:/data совпадает сам, env не нужен;
+# на Docker Desktop Windows — Windows-путь тома, напр. D:\...\data\runtime).
+WORKER_BIND_ROOT = os.environ.get("WORKER_BIND_ROOT", "")
 WORKER_IMAGE = os.environ.get("WORKER_IMAGE", "audio-worker:2.4.2")
+
+# Панель запущена внутри контейнера (Docker откладывает /.dockerenv, некоторые
+# рантаймы — /run/.containerenv): нужно для маршрутизации к хостовым портам
+# опубликованных воркеров (telnet живой подстройки) через host.docker.internal.
+_PANEL_INSIDE_CONTAINER = os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv")
 
 import importlib.util as _ilu
 
@@ -957,6 +968,16 @@ class DockerWorkerManager:
         return os.path.join(runtime_dir, "station.liq")
 
     @staticmethod
+    def _bind_source(script_path):
+        """Путь bind source, видимый демону Docker (хостовый).
+
+        См. WORKER_BIND_ROOT: без него возвращается путь как есть."""
+        if WORKER_BIND_ROOT:
+            rel = os.path.relpath(script_path, RUNTIME_DIR)
+            return os.path.join(WORKER_BIND_ROOT, rel)
+        return script_path
+
+    @staticmethod
     def _is_running(container):
         try:
             container.reload()
@@ -1001,7 +1022,7 @@ class DockerWorkerManager:
                 name=self.container_name,
                 command=["/station.liq"],
                 mounts=[docker.types.Mount(
-                    target="/station.liq", source=script_path,
+                    target="/station.liq", source=self._bind_source(script_path),
                     type="bind", read_only=True,
                 )],
                 labels={"audio-panel": "1", "audio-panel.station": self.station_id},
@@ -1075,6 +1096,11 @@ class DockerWorkerManager:
         host = bindings[0].get("HostIp") or "127.0.0.1"
         if host in ("", "0.0.0.0", "::"):
             host = "127.0.0.1"
+        if host == "127.0.0.1" and _PANEL_INSIDE_CONTAINER:
+            # Панель сама в контейнере: 127.0.0.1 — её собственный loopback,
+            # а telnet-порт воркера опубликован на loopback ДЕМОНА. Хост
+            # достижим через host.docker.internal (compose: extra_hosts).
+            host = "host.docker.internal"
         port = bindings[0].get("HostPort")
         if not port:
             return None
@@ -1133,6 +1159,57 @@ class DockerWorkerManager:
         if err:
             return False, err
         return True, "EQ подстроен живьём (10 полос)"
+
+    def adjust_interactive_vars(self, var_values):
+        """Живая подстройка произвольных интерактивных переменных воркера.
+
+        var_values — {имя переменной: float}; все имена в одном telnet-подключении.
+        Имена и диапазоны задаёт вызывающий код (compressor/limiter и т.п.)."""
+        with self.lock:
+            container = self.container
+        if container is None or not self._is_running(container):
+            return False, "воркер не запущен"
+        host_port = self.telnet_host_port()
+        if host_port is None:
+            return False, "telnet-порт воркера недоступен (удалённый демон Docker?)"
+        commands = [
+            "var.set {name} = {v}".format(name=name, v=_fmt_telnet_float(value))
+            for name, value in var_values.items()
+        ]
+        try:
+            outputs = _telnet_session(host_port[0], host_port[1], commands)
+        except Exception as exc:
+            return False, "telnet: {}".format(exc)
+        err = self._telnet_check(outputs)
+        if err:
+            return False, err
+        return True, "подстроено живьём: " + ", ".join(var_values)
+
+    def adjust_compressor(self, params):
+        """Живая подстройка компрессора (нативный compress, panel_comp_*)."""
+        clamped = {
+            "threshold": max(-60.0, min(0.0, float(params.get("threshold", -20)))),
+            "ratio": max(1.0, min(20.0, float(params.get("ratio", 4)))),
+            "attack": max(0.1, min(1000.0, float(params.get("attack", 5)))),
+            "release": max(10.0, min(2000.0, float(params.get("release", 120)))),
+            "makeup": max(-24.0, min(24.0, float(params.get("makeup", 0)))),
+        }
+        ok, msg = self.adjust_interactive_vars(
+            {"panel_comp_" + k: v for k, v in clamped.items()})
+        return ok, (msg if ok else msg), clamped
+
+    def adjust_limiter(self, params):
+        """Живая подстройка лимитера (нативный limit, panel_lim_*)."""
+        clamped = {
+            "ceiling_db": max(-30.0, min(0.0, float(params.get("ceiling_db", -1)))),
+            "attack": max(0.1, min(1000.0, float(params.get("attack", 5)))),
+            "release": max(10.0, min(2000.0, float(params.get("release", 50)))),
+        }
+        ok, msg = self.adjust_interactive_vars(
+            {"panel_lim_ceiling": clamped["ceiling_db"],
+             "panel_lim_attack": clamped["attack"],
+             "panel_lim_release": clamped["release"]})
+        return ok, (msg if ok else msg), clamped
 
     def set_bypass(self, enabled):
         """Живое переключение BYPASS воркера через telnet (без перезапуска)."""
@@ -1512,13 +1589,20 @@ def api_station_command(station_id):
 
 @app.route("/api/streams/<station_id>/adjust", methods=["POST"])
 def api_station_adjust(station_id):
-    """Живая подстройка работающего воркера: gain_db и/или eq_gains (без перезапуска)."""
+    """Живая подстройка работающего воркера (без перезапуска).
+
+    Принимает любое сочетание: gain_db, eq_gains, compressor {}, limiter {}.
+    Компрессор/лимитер доступны на движке Liquidsoap (нативные compress/limit
+    с геттерами); loudnorm остаётся статичным — его параметры применяются
+    при перезапуске воркера."""
     station = get_station(station_id)
     if station is None:
         return _station_not_found()
     body = request.get_json(silent=True) or {}
     gain_db = None
     eq_gains = None
+    compressor = None
+    limiter = None
     if "gain_db" in body:
         try:
             gain_db = float(body["gain_db"])
@@ -1535,8 +1619,22 @@ def api_station_adjust(station_id):
             eq_gains = [float(g) for g in raw]
         except (TypeError, ValueError):
             return jsonify({"ok": False, "error": "eq_gains должен быть списком чисел"}), 400
-    if gain_db is None and eq_gains is None:
-        return jsonify({"ok": False, "error": "укажите gain_db и/или eq_gains"}), 400
+    for key in ("compressor", "limiter"):
+        if key in body:
+            raw = body[key]
+            if not isinstance(raw, dict):
+                return jsonify({"ok": False, "error": "{} должен быть объектом".format(key)}), 400
+            try:
+                parsed = {k: float(v) for k, v in raw.items()}
+            except (TypeError, ValueError):
+                return jsonify({"ok": False, "error": "{}: все значения должны быть числами".format(key)}), 400
+            if key == "compressor":
+                compressor = parsed
+            else:
+                limiter = parsed
+    if gain_db is None and eq_gains is None and compressor is None and limiter is None:
+        return jsonify({"ok": False, "error":
+                        "укажите gain_db и/или eq_gains и/или compressor и/или limiter"}), 400
     if station.get("engine") != "liquidsoap":
         return jsonify({
             "ok": False,
@@ -1555,11 +1653,27 @@ def api_station_adjust(station_id):
         if not ok:
             return jsonify({"ok": False, "error": msg}), 409
         message.append(msg)
+    if compressor is not None:
+        ok, msg, clamped = manager.adjust_compressor(compressor)
+        if not ok:
+            return jsonify({"ok": False, "error": msg}), 409
+        compressor = clamped
+        message.append("компрессор подстроен живьём")
+    if limiter is not None:
+        ok, msg, clamped = manager.adjust_limiter(limiter)
+        if not ok:
+            return jsonify({"ok": False, "error": msg}), 409
+        limiter = clamped
+        message.append("лимитер подстроен живьём")
     patch = {}
     if gain_db is not None:
         patch["gain"] = {"enabled": True, "db": gain_db}
     if eq_gains is not None:
         patch["equalizer"] = {"enabled": True, "gains": eq_gains}
+    if compressor is not None:
+        patch["compressor"] = {"enabled": True, **compressor}
+    if limiter is not None:
+        patch["limiter"] = {"enabled": True, **limiter}
     updated = update_station(station_id, patch)
     return jsonify({
         "ok": True,
@@ -1567,6 +1681,8 @@ def api_station_adjust(station_id):
         "message": "; ".join(message),
         "gain": updated.get("gain"),
         "equalizer": updated.get("equalizer"),
+        "compressor": updated.get("compressor"),
+        "limiter": updated.get("limiter"),
     })
 
 

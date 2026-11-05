@@ -572,6 +572,7 @@
               <input type="range" id="ln_lra" min="1" max="20" step="1">
             </div>
           </div>
+          <div class="hint">Loudnorm применяется при перезапуске воркера — живой подстройки нет (в отличие от EQ, усиления, компрессора и лимитера)</div>
         </div>
       </section>
 
@@ -780,8 +781,8 @@
 </div>
 
 <footer>
-  Цепочка каждой станции: источник AAC / HE-AAC / MP3 → <code>equalizer</code> → <code>acompressor</code> → <code>loudnorm</code> → <code>alimiter</code> → AAC → Icecast (ADTS).
-  Реестр станций хранится в <code>streams.json</code> рядом с <code>app.py</code>.
+  Цепочка воркера Liquidsoap: источник AAC / HE-AAC / MP3 → EQ (10 полос) → усиление → компрессор → loudnorm → лимитер → AAC (FDK) → Icecast.
+  EQ, усиление, компрессор и лимитер подстраиваются живьём на работающем воркере; loudnorm — при перезапуске. Реестр станций хранится в <code>streams.json</code> рядом с <code>app.py</code>.
 </footer>
 
 <div class="toast" id="toast"></div>

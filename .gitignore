@@ -14,3 +14,7 @@ __pycache__/
 # Локальные логи и файлы-посредники
 .smoke-server.log
 .wb-*.json
+
+# Локальный override compose (например, порт панели занят Hyper-V-диапазоном)
+docker-compose.override.yml
+

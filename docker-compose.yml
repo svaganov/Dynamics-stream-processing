@@ -22,11 +22,22 @@ services:
       # Реестр станций + runtime .liq воркеров (пути bind-mount'ов должны
       # быть видны демону Docker, поэтому это хостовый том).
       - ./data:/data
+    # Панель внутри контейнера достаёт опубликованные на хосте telnet-порты
+    # воркеров (живая подстройка) через host.docker.internal (см. app.py:
+    # _PANEL_INSIDE_CONTAINER). На Linux-хосте с нативным docker это имя
+    # можно не задавать — панель тогда обычно работает на хосте.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       HOST: 0.0.0.0
       PORT: 8770
       STREAMS_PATH: /data/streams.json
       WORKER_RUNTIME_DIR: /data/runtime
+      # Хостовый путь того же рантайм-каталога: демон резолвит bind source
+      # воркеров на хосте, а /data/runtime внутри контейнера ему не виден.
+      # На Linux-хосте с этим же монтированием совпадает сам — не нужен.
+      # На Docker Desktop Windows укажите Windows-путь тома, напр.:
+      # WORKER_BIND_ROOT: "D:\\GitHub_Projects\\Dynamics-stream-processing\\data\\runtime"
       # Для удалённого демона задайте здесь или снаружи:
       # DOCKER_HOST: tcp://remote-host:2376
       WORKER_IMAGE: audio-worker:2.4.2

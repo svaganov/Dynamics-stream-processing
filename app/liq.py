@@ -17,6 +17,15 @@ panel_eq_<частота> (ffmpeg-вариант принимал gain толь�
 не менялся): любую полосу (в том числе с нуля) можно подстроить на
 работающем воркере (telnet: var.set panel_eq_1000 = 3.0).
 
+Компрессор и лимитер — нативные compress/limit в PCM-домене, все ключевые
+параметры (порог, ratio, attack, release, makeup; ceiling, attack, release)
+передаются геттерами от интерактивных переменных panel_comp_* / panel_lim_*:
+панель подстраивает динамику работающего воркера без перезапуска
+(telnet: var.set panel_comp_threshold = -24.). Раньше оба жили внутри
+ffmpeg-графа и «запекались» при старте. Loudnorm нативного живого
+эквивалента не имеет — остаётся единственным фильтром ffmpeg-графа,
+его параметры применяются при перезапуске воркера.
+
 Обработанный сигнал собирается в отдельную ветку proc, а выход воркера —
 switch на интерактивной переменной panel_bypass: панель переключает
 BYPASS работающего воркера живьём (telnet: var.set panel_bypass = true|false).
@@ -99,19 +108,23 @@ def _eq_interactive_vars(cfg):
     return "\n".join(lines)
 
 
-def _compressor_call(cfg):
+def _compressor_block(cfg, src="proc", dst="proc"):
+    """Нативный компрессор compress с живыми параметрами-геттерами.
+
+    ffmpeg.filter.acompressor принимал значения только статически — они
+    «запекались» при генерации .liq и живьём не менялись. Нативный compress
+    перечитывает геттеры каждый кадр: порог, ratio, attack, release и makeup
+    подстраиваются telnet-командами «var.set panel_comp_* = ...» без
+    перезапуска воркера. Makeup у compress — это gain (post-amplification, дБ)."""
     comp = cfg.get("compressor", {})
     if not comp.get("enabled"):
         return None
-    threshold = db_to_linear(comp.get("threshold", -20))  # ffmpeg-порог — линейный
-    makeup = db_to_linear(comp.get("makeup", 0))          # и makeup тоже
     return (
-        "ffmpeg.filter.acompressor(threshold={t}, ratio={r}, attack={a},"
-        " release={rel}, makeup={m}, graph, ".format(
-            t=_f(threshold), r=_f(comp.get("ratio", 4)),
-            a=_f(comp.get("attack", 5)), rel=_f(comp.get("release", 120)),
-            m=_f(makeup),
-        )
+        "# --- компрессор: compress — threshold/ratio/attack/release/makeup живые ---\n"
+        "# (параметры-геттеры panel_comp_*: compress перечитывает их каждый кадр)\n"
+        "{dst} = compress(threshold=panel_comp_threshold, ratio=panel_comp_ratio,\n"
+        "  attack=panel_comp_attack, release=panel_comp_release,\n"
+        "  gain=panel_comp_makeup, {src})".format(src=src, dst=dst)
     )
 
 
@@ -119,21 +132,28 @@ def _loudnorm_call(cfg):
     ln = cfg.get("loudnorm", {})
     if not ln.get("enabled"):
         return None
-    # linear=false — динамический режим, пригодный для live-потоков
+    # linear=false — динамический режим, пригодный для live-потоков.
+    # Loudnorm остался единственным фильтром ffmpeg-графа: нативного живого
+    # эквивалента нет, параметры применяются при перезапуске воркера.
     return "ffmpeg.filter.loudnorm(i={i}, tp={tp}, lra={lra}, linear=false, graph, ".format(
         i=_f(ln.get("i", -14)), tp=_f(ln.get("tp", -1.5)), lra=_f(ln.get("lra", 11)),
     )
 
 
-def _limiter_call(cfg):
+def _limiter_block(cfg, src="proc", dst="proc"):
+    """Нативный лимитер limit с живыми параметрами-геттерами.
+
+    Заменяет ffmpeg.filter.alimiter (level=false): потолок, attack и release
+    перечитываются каждый кадр из panel_lim_* — панель подстраивает лимитер
+    работающего воркера без перезапуска. ceiling (дБ) у limit — это threshold."""
     lim = cfg.get("limiter", {})
     if not lim.get("enabled"):
         return None
-    ceiling = db_to_linear(lim.get("ceiling_db", -1.0))  # alimiter limit — линейный
-    # level=false — без авто-подъёма: иначе alimiter не ограничивает пики,
-    # а поднимает весь сигнал к потолку и пики проскакивают (max 0 dBFS).
-    return "ffmpeg.filter.alimiter(limit={c}, attack={a}, release={r}, level=false, graph, ".format(
-        c=_f(ceiling), a=_f(lim.get("attack", 5)), r=_f(lim.get("release", 50)),
+    return (
+        "# --- лимитер: limit — ceiling/attack/release живые ---\n"
+        "# (параметры-геттеры panel_lim_*: limit перечитывает их каждый кадр)\n"
+        "{dst} = limit(threshold=panel_lim_ceiling, attack=panel_lim_attack,\n"
+        "  release=panel_lim_release, {src})".format(src=src, dst=dst)
     )
 
 
@@ -206,12 +226,11 @@ def _processing_block(cfg):
 
     eq_chain = _eq_chain(cfg)
     gain_block = _gain_block(cfg)
-    dyn_calls = []
-    for stage in (_compressor_call(cfg), _loudnorm_call(cfg), _limiter_call(cfg)):
-        if stage:
-            dyn_calls.append(stage)
+    comp_block = _compressor_block(cfg)
+    ln_call = _loudnorm_call(cfg)
+    lim_block = _limiter_block(cfg)
 
-    if not (eq_chain or gain_block or dyn_calls):
+    if not (eq_chain or gain_block or comp_block or ln_call or lim_block):
         return None  # всё выключено — декод/код без фильтров, live-BYPASS не нужен
 
     parts = [
@@ -220,14 +239,16 @@ def _processing_block(cfg):
     ]
 
     def _raw_wrapped(graph_block, comment, src, dst):
-        # ffmpeg-фильтры (динамика) работают поверх raw-формата:
-        # encode → граф → decode. EQ (IIR) и усиление нативные, PCM-домен.
+        # Loudnorm — единственный оставшийся ffmpeg-фильтр: raw encode → граф →
+        # decode. buffer() после decode разводит clock-контекст (граф живёт
+        # во вложенном clock), чтобы за ним мог идти нативный лимитер.
         return "\n\n".join([
             "# raw-обёртка: {c}\n"
             "{dst} = ffmpeg.raw.encode.audio(%ffmpeg(%audio.raw), {src})".format(
                 c=comment, src=src, dst=dst),
             graph_block,
             "{dst} = ffmpeg.raw.decode.audio({src})".format(src=dst, dst=dst),
+            "{dst} = buffer({src})".format(src=dst, dst=dst),
         ])
 
     current = "s"
@@ -237,14 +258,51 @@ def _processing_block(cfg):
     if gain_block:
         parts.append(_gain_block(cfg, src=current, dst="proc"))
         current = "proc"
-    if dyn_calls:
-        dyn_block = _graph_block("dyn_mkfilter", "компрессор → loudnorm → лимитер",
-                                 dyn_calls, src="proc", dst="proc")
-        parts.append(_raw_wrapped(dyn_block, "граф динамики", current, "proc"))
+    if comp_block:
+        parts.append(_compressor_block(cfg, src=current, dst="proc"))
+        current = "proc"
+    if ln_call:
+        ln_graph = _graph_block("loudnorm_mkfilter", "loudnorm (ffmpeg-граф)",
+                                [ln_call], src="proc", dst="proc")
+        parts.append(_raw_wrapped(ln_graph, "граф loudnorm", current, "proc"))
+        current = "proc"
+    if lim_block:
+        parts.append(_limiter_block(cfg, src=current, dst="proc"))
         current = "proc"
 
     parts.append(_live_bypass_block())
     return "\n\n".join(parts)
+
+
+def _dyn_interactive_vars(cfg):
+    """Объявления panel_comp_* / panel_lim_* со стартовыми значениями из конфигурации.
+
+    Объявляются только для включённых блоков: лишняя переменная не мешает,
+    но чистый скрипт проще читать в панели."""
+    lines = []
+    comp = cfg.get("compressor", {})
+    if comp.get("enabled"):
+        lines.append("# Компрессор (живьём по telnet «var.set panel_comp_<парам> = <знач>»)")
+        for name, value in (
+            ("panel_comp_threshold", max(-60.0, min(0.0, float(comp.get("threshold", -20))))),
+            ("panel_comp_ratio", max(1.0, min(20.0, float(comp.get("ratio", 4))))),
+            ("panel_comp_attack", max(0.1, min(1000.0, float(comp.get("attack", 5))))),
+            ("panel_comp_release", max(10.0, min(2000.0, float(comp.get("release", 120))))),
+            ("panel_comp_makeup", max(-24.0, min(24.0, float(comp.get("makeup", 0))))),
+        ):
+            lines.append('{name} = interactive.float("{name}", {v})'.format(
+                name=name, v=_f(value)))
+    lim = cfg.get("limiter", {})
+    if lim.get("enabled"):
+        lines.append("# Лимитер (живьём по telnet «var.set panel_lim_<парам> = <знач>»)")
+        for name, value in (
+            ("panel_lim_ceiling", max(-30.0, min(0.0, float(lim.get("ceiling_db", -1))))),
+            ("panel_lim_attack", max(0.1, min(1000.0, float(lim.get("attack", 5))))),
+            ("panel_lim_release", max(10.0, min(2000.0, float(lim.get("release", 50))))),
+        ):
+            lines.append('{name} = interactive.float("{name}", {v})'.format(
+                name=name, v=_f(value)))
+    return "\n".join(lines) if lines else None
 
 
 def _initial_gain_linear(cfg):
@@ -309,6 +367,10 @@ def generate_liq_script(cfg):
     eq_vars = _eq_interactive_vars(cfg)
     if eq_vars:
         parts += [eq_vars, ""]
+
+    dyn_vars = _dyn_interactive_vars(cfg)
+    if dyn_vars:
+        parts += [dyn_vars, ""]
 
     if block:
         parts.append(block)
