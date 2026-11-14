@@ -26,6 +26,12 @@ ffmpeg-графа и «запекались» при старте. Loudnorm на
 эквивалента не имеет — остаётся единственным фильтром ffmpeg-графа,
 его параметры применяются при перезапуске воркера.
 
+Включение/выключение секций (EQ, усиление, компрессор, loudnorm, лимитер)
+работает живьём, как BYPASS: каждая включённая при старте секция обёрнута
+switch на интерактивной bool-переменной panel_<секция>_on
+(telnet: var.set panel_comp_on = false). Секция, выключенная при старте
+воркера, появится в цепочке (и станет управляемой) после его перезапуска.
+
 Обработанный сигнал собирается в отдельную ветку proc, а выход воркера —
 switch на интерактивной переменной panel_bypass: панель переключает
 BYPASS работающего воркера живьём (telnet: var.set panel_bypass = true|false).
@@ -215,12 +221,41 @@ def _live_bypass_block():
     )
 
 
+# Живые выключатели секций: переменная panel_<секция>_on объявляется в скрипте,
+# только если секция включена в конфигурации станции (т.е. присутствует в
+# цепочке). «var.set panel_<секция>_on = true|false» включает/выключает
+# секцию работающего воркера без перезапуска — как BYPASS, но по секциям.
+SECTION_TOGGLE_VARS = {
+    "equalizer": "panel_eq_on",
+    "gain": "panel_gain_on",
+    "compressor": "panel_comp_on",
+    "loudnorm": "panel_ln_on",
+    "limiter": "panel_lim_on",
+}
+
+
+def _section_switch(var_name, stage_var, title):
+    """switch «секция ↔ обход» на интерактивной bool-переменной.
+
+    Ветка обхода — исходный s (до секции); ветка обработки — stage_var.
+    Выход снова присваивается s: top-level rebinding в Liquidsoap допустим."""
+    return (
+        "# {title}: живой вкл/выкл секции — «var.set {var} = true|false» (без перезапуска)\n"
+        "s = switch(track_sensitive=false, [\n"
+        "  ({var}, {stage}),\n"
+        "  ({{not {var}()}}, s)\n"
+        "])".format(var=var_name, stage=stage_var, title=title)
+    )
+
+
 def _processing_block(cfg):
     """Блок обработки + live-BYPASS, или None для статического BYPASS.
 
     Статический bypass (cfg["bypass"]) — ветки обработки в скрипте нет совсем.
-    Иначе обработка собирается в переменную proc, а выход — switch на
-    интерактивной переменной panel_bypass (панель переключает живьём)."""
+    Иначе каждая включённая секция собирается в отдельную переменную
+    (<секция>_stage) и оборачивается switch на panel_<секция>_on: панель
+    включает/выключает секции работающего воркера живьём (как BYPASS).
+    Результат собирается в proc, выход — switch на panel_bypass."""
     if cfg.get("bypass"):
         return None
 
@@ -234,44 +269,66 @@ def _processing_block(cfg):
         return None  # всё выключено — декод/код без фильтров, live-BYPASS не нужен
 
     parts = [
-        "# --- цепочка обработки (ветка proc, live-BYPASS через panel_bypass): "
-        "EQ → усиление → компрессор → loudnorm → лимитер ---",
+        "# --- цепочка обработки (live-BYPASS через panel_bypass, живые "
+        "выключатели секций panel_*_on): EQ → усиление → компрессор → "
+        "loudnorm → лимитер ---",
     ]
 
     def _raw_wrapped(graph_block, comment, src, dst):
         # Loudnorm — единственный оставшийся ffmpeg-фильтр: raw encode → граф →
         # decode. buffer() после decode разводит clock-контекст (граф живёт
-        # во вложенном clock), чтобы за ним мог идти нативный лимитер.
+        # во вложенном clock) перед возвратом в общую цепочку.
         return "\n\n".join([
             "# raw-обёртка: {c}\n"
-            "{dst} = ffmpeg.raw.encode.audio(%ffmpeg(%audio.raw), {src})".format(
-                c=comment, src=src, dst=dst),
+            "ln_raw = ffmpeg.raw.encode.audio(%ffmpeg(%audio.raw), {src})".format(
+                c=comment, src=src),
             graph_block,
-            "{dst} = ffmpeg.raw.decode.audio({src})".format(src=dst, dst=dst),
-            "{dst} = buffer({src})".format(src=dst, dst=dst),
+            "{dst} = ffmpeg.raw.decode.audio(ln_raw)".format(dst=dst),
+            "{dst} = buffer({dst})".format(dst=dst),
         ])
 
-    current = "s"
     if eq_chain:
-        parts.append(_eq_chain(cfg, src=current, dst="proc"))
-        current = "proc"
+        parts.append(_eq_chain(cfg, src="s", dst="eq_stage"))
+        parts.append(_section_switch("panel_eq_on", "eq_stage", "EQ (10 полос)"))
     if gain_block:
-        parts.append(_gain_block(cfg, src=current, dst="proc"))
-        current = "proc"
+        parts.append(_gain_block(cfg, src="s", dst="gain_stage"))
+        parts.append(_section_switch("panel_gain_on", "gain_stage", "усиление"))
     if comp_block:
-        parts.append(_compressor_block(cfg, src=current, dst="proc"))
-        current = "proc"
+        parts.append(_compressor_block(cfg, src="s", dst="comp_stage"))
+        parts.append(_section_switch("panel_comp_on", "comp_stage", "компрессор"))
     if ln_call:
         ln_graph = _graph_block("loudnorm_mkfilter", "loudnorm (ffmpeg-граф)",
-                                [ln_call], src="proc", dst="proc")
-        parts.append(_raw_wrapped(ln_graph, "граф loudnorm", current, "proc"))
-        current = "proc"
+                                [ln_call], src="ln_raw", dst="ln_raw")
+        parts.append(_raw_wrapped(ln_graph, "граф loudnorm", "s", "ln_stage"))
+        parts.append(_section_switch("panel_ln_on", "ln_stage", "loudnorm"))
     if lim_block:
-        parts.append(_limiter_block(cfg, src=current, dst="proc"))
-        current = "proc"
+        parts.append(_limiter_block(cfg, src="s", dst="lim_stage"))
+        parts.append(_section_switch("panel_lim_on", "lim_stage", "лимитер"))
 
+    parts.append("proc = s")
     parts.append(_live_bypass_block())
     return "\n\n".join(parts)
+
+
+def _section_bool_vars(cfg):
+    """Объявления panel_*_on для секций, включённых в конфигурации станции.
+
+    Секция присутствует в цепочке воркера (и управляется живьём), только если
+    была включена при старте; выключенные при старте секции появятся после
+    перезапуска воркера."""
+    mapping = (
+        ("equalizer", "panel_eq_on"),
+        ("gain", "panel_gain_on"),
+        ("compressor", "panel_comp_on"),
+        ("loudnorm", "panel_ln_on"),
+        ("limiter", "panel_lim_on"),
+    )
+    lines = ["# Живые выключатели секций: «var.set panel_<секция>_on = true|false»"]
+    for section, var in mapping:
+        enabled = (cfg.get(section) or {}).get("enabled")
+        if enabled:
+            lines.append('{name} = interactive.bool("{name}", true)'.format(name=var))
+    return "\n".join(lines) if len(lines) > 1 else None
 
 
 def _dyn_interactive_vars(cfg):
@@ -371,6 +428,10 @@ def generate_liq_script(cfg):
     dyn_vars = _dyn_interactive_vars(cfg)
     if dyn_vars:
         parts += [dyn_vars, ""]
+
+    sec_vars = _section_bool_vars(cfg)
+    if sec_vars:
+        parts += [sec_vars, ""]
 
     if block:
         parts.append(block)

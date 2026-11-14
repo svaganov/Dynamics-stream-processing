@@ -387,8 +387,72 @@ class PanelApiTest(unittest.TestCase):
         self.assertEqual(station["compressor"]["threshold"], -24.0)
         self.assertEqual(station["compressor"]["ratio"], 6.0)
 
-    def test_bind_source_mapping_for_containerized_panel(self):
-        # Панель в контейнере: bind source резолвится демоном на хосте, поэтому
+    def test_adjust_compressor_block_disabled_at_start_is_friendly(self):
+        # Переменных panel_comp_* нет в скрипте воркера, если компрессор был
+        # выключен при его старте: вместо сырой telnet-ошибки — понятное
+        # «применится при перезапуске», и значения сохраняются в реестре.
+        station_id, _ = self._make_running_liquidsoap_station()
+        with mock.patch.object(panel, "_telnet_session",
+                               return_value=["Syntax error or variable not found.\nEND"] * 5):
+            res = self.client.post(
+                "/api/streams/{}/adjust".format(station_id),
+                json={"compressor": {"threshold": -30, "ratio": 5}})
+        self.assertEqual(res.status_code, 200)
+        data = res.get_json()
+        self.assertTrue(data["ok"])
+        self.assertIn("перезапуске", data["message"])
+        station = self.client.get("/api/streams/" + station_id).get_json()["station"]
+        self.assertEqual(station["compressor"]["threshold"], -30.0)
+
+    def test_adjust_sections_sends_telnet_and_persists(self):
+        # Живое выключение секции: «var.set panel_<секция>_on = false» +
+        # сохранение флага enabled в реестре (как у BYPASS)
+        station_id, _ = self._make_running_liquidsoap_station()
+        with mock.patch.object(panel, "_telnet_command",
+                               return_value="Variable panel_comp_on set.\nEND") as tel:
+            res = self.client.post(
+                "/api/streams/{}/adjust".format(station_id),
+                json={"sections": {"compressor": False}})
+        self.assertEqual(res.status_code, 200)
+        data = res.get_json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["mode"], "live")
+        tel.assert_called_once_with("127.0.0.1", 55999, "var.set panel_comp_on = false")
+        station = self.client.get("/api/streams/" + station_id).get_json()["station"]
+        self.assertFalse(station["compressor"]["enabled"])
+        # в ответе отдаются актуальные блоки обработки, включая loudnorm
+        self.assertIn("loudnorm", data)
+
+    def test_adjust_section_disabled_at_start_is_friendly(self):
+        # Секция, выключенная при старте воркера, не имеет переменной
+        # panel_<секция>_on: вместо ошибки — «включится при перезапуске»,
+        # значение сохраняется в реестре
+        station_id, _ = self._make_running_liquidsoap_station()
+        with mock.patch.object(panel, "_telnet_command",
+                               return_value="Syntax error or variable not found.\nEND"):
+            res = self.client.post(
+                "/api/streams/{}/adjust".format(station_id),
+                json={"sections": {"loudnorm": True}})
+        self.assertEqual(res.status_code, 200)
+        data = res.get_json()
+        self.assertTrue(data["ok"])
+        self.assertIn("перезапуске", data["message"])
+        station = self.client.get("/api/streams/" + station_id).get_json()["station"]
+        self.assertTrue(station["loudnorm"]["enabled"])
+
+    def test_adjust_sections_validation(self):
+        station_id, _ = self._make_running_liquidsoap_station()
+        res = self.client.post(
+            "/api/streams/{}/adjust".format(station_id),
+            json={"sections": {"warp_drive": True}})
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("неизвестные секции", res.get_json()["error"])
+        res = self.client.post(
+            "/api/streams/{}/adjust".format(station_id),
+            json={"sections": ["compressor"]})
+        self.assertEqual(res.status_code, 400)
+
+    def test_bind_source_mapping_for_containerized_panel(self):        # Панель в контейнере: bind source резолвится демоном на хосте, поэтому
         # WORKER_BIND_ROOT переносит относительный путь скрипта на хостовый корень.
         with mock.patch.object(panel, "WORKER_BIND_ROOT",
                                r"D:\proj\data\runtime"):

@@ -110,11 +110,19 @@ docker compose up -d --build
 
 ```text
 input.http (max_buffer 10 c, reconnect)                       приём + декод
-  ├─ (ветка proc) filter.iir.eq.peak ×10 полос                EQ, gain-геттеры, live
-  │   → amplify(panel_gain, proc) (опционально)               усиление, live
-  │   → compress(threshold/ratio/attack/release/gain, proc)   компрессор, live (нативный)
-  │   → ffmpeg.raw.encode.audio → loudnorm → decode → buffer  единственный ffmpeg-фильтр
-  │   → limit(threshold/attack/release, proc)                 лимитер, live (нативный)
+  ├─ (цепочка секций; каждая — stage + свой живой switch)     EQ → усиление → компрессор → loudnorm → лимитер
+  │   eq_stage = filter.iir.eq.peak ×10 полос                 EQ, gain-геттеры, live
+  │   s = switch(panel_eq_on): eq_stage ↔ s                   живой вкл/выкл секции
+  │   gain_stage = amplify(panel_gain, s)                     усиление, live
+  │   s = switch(panel_gain_on): gain_stage ↔ s
+  │   comp_stage = compress(threshold/ratio/attack/release/gain, s)  компрессор, live (нативный)
+  │   s = switch(panel_comp_on): comp_stage ↔ s
+  │   ln_raw = ffmpeg.raw.encode.audio → loudnorm             единственный ffmpeg-фильтр
+  │   ln_stage = ffmpeg.raw.decode.audio → buffer(ln_stage)
+  │   s = switch(panel_ln_on): ln_stage ↔ s                   живой вкл/выкл loudnorm
+  │   lim_stage = limit(threshold/attack/release, s)          лимитер, live (нативный)
+  │   s = switch(panel_lim_on): lim_stage ↔ s
+  │   proc = s
   └─ switch(track_sensitive=false, panel_bypass)              live-BYPASS: вход ↔ обработка
   → output.icecast (fallible=true)                            FDK-AAC → ADTS → Icecast
 ```
@@ -131,7 +139,8 @@ input.http (max_buffer 10 c, reconnect)                       приём + де�
   Геттеры перечитываются каждый кадр — подстройка слышна сразу.
 - `loudnorm` в динамическом режиме (`linear=false`) — пригоден для live-потоков, но
   нативного живого эквивалента не имеет: остался единственным фильтром ffmpeg-графа,
-  его параметры применяются при перезапуске воркера.
+  его параметры (i/tp/lra) применяются при перезапуске воркера. Сама секция
+  loudnorm включается/выключается живьём — общим механизмом выключателей секций.
 - Нативные `compress`/`limit` принимают пороги в дБ напрямую (конверсия 10^(dB/20),
   нужная ffmpeg-фильтрам, больше не требуется); makeup у `compress` — это `gain` (дБ).
 - `buffer(proc)` после `ffmpeg.raw.decode.audio` разводит clock-контекст: граф живёт
@@ -156,12 +165,18 @@ Liquidsoap: `settings.server.telnet` на порту 1234, публикуетс�
 переменными `panel_comp_threshold/ratio/attack/release/makeup`, лимитер —
 нативный `limit` с переменными `panel_lim_ceiling/attack/release`: движение
 ползунков в панели подстраивает их на работающем воркере без перезапуска.
-Loudnorm живым не управляется (см. выше) — его подсказка в карточке прямо это
-фиксирует. Обработанный сигнал собирается в отдельную ветку `proc`, а выход
-воркера — `switch` на переменной `panel_bypass`: переключатель BYPASS в шапке
-панели работает живьём для запущенной Liquidsoap-станции. Автоприменение
-слайдеров (усиление, EQ, компрессор, лимитер), кнопка **«⚡ Живьём»**, пресеты
-EQ и переключатель BYPASS шлют:
+Каждая включённая при старте секция оборачивается своим переключателем
+`switch(track_sensitive=false, panel_<секция>_on)`: галочки секций в панели
+(EQ, усиление, компрессор, loudnorm, лимитер) включают и выключают их
+живьём, без перезапуска воркера — по той же схеме, что и общий BYPASS.
+Параметры loudnorm (i/tp/lra) по-прежнему применяются только при
+перезапуске. Обработанный сигнал собирается в отдельную ветку `proc`,
+а выход воркера — `switch` на переменной `panel_bypass`: переключатель
+BYPASS в шапке панели работает живьём для запущенной Liquidsoap-станции
+и ортогонален секционным выключателям (BYPASS обходит всю цепочку целиком,
+выключатель секции — только свой этап). Автоприменение слайдеров
+(усиление, EQ, компрессор, лимитер), кнопка **«⚡ Живьём»**, пресеты
+EQ, галочки секций и переключатель BYPASS шлют:
 
 ```text
 POST /api/streams/<id>/adjust      {"gain_db": 3.0}
@@ -169,26 +184,33 @@ POST /api/streams/<id>/adjust      {"eq_gains": [0,0,6,0,0,0,0,0,0,0]}
 POST /api/streams/<id>/adjust      {"compressor": {"threshold": -24, "ratio": 6,
                                                     "attack": 3, "release": 200, "makeup": 2},
                                       "limiter": {"ceiling_db": -3, "attack": 2, "release": 80}}
+POST /api/streams/<id>/adjust      {"sections": {"compressor": false, "loudnorm": true}}
 POST /api/streams/<id>/bypass      {"enabled": true|false}
   → 200 {"ok": true, "mode": "live", ...}
   → 409 (движок FFmpeg / воркер не запущен / ошибка telnet)
-  → 400 (пустой /adjust; неверный список eq_gains / объект compressor|limiter)
+  → 400 (пустой /adjust; неверный список eq_gains / объект compressor|limiter /
+         неизвестная секция в sections)
 ```
 
 Панель выполняет `var.set panel_gain = <линейное>` /
 `var.set panel_comp_<парам> = <дБ>` / `var.set panel_lim_<парам> = <дБ>` /
-`var.set panel_bypass = true|false` по telnet (усиление переводится в
-линейное `10^(dB/20)`, диапазон ±24 дБ; параметры динамики клампятся в
-безопасные диапазоны); значения одновременно сохраняются в `streams.json`,
-чтобы рестарт поднялся с ними. Ограничения:
+`var.set panel_<секция>_on = true|false` / `var.set panel_bypass = true|false`
+по telnet (усиление переводится в линейное `10^(dB/20)`, диапазон ±24 дБ;
+параметры динамики клампятся в безопасные диапазоны); значения одновременно
+сохраняются в `streams.json`, чтобы рестарт поднялся с ними. Ограничения:
 
 - только движок `liquidsoap`; для FFmpeg изменения применяются при перезапуске;
 - работает только при локальном демоне Docker: при `DOCKER_HOST` порт мапится
   на удалённом хосте и живьём не достичь — API вернёт 409;
+- живой выключатель секции появляется в скрипте, только если секция была
+  включена при старте воркера: если переменной `panel_<секция>_on` нет,
+  API вместо ошибки отвечает «секция сохранена — включится при перезапуске
+  воркера», и значение сохраняется в реестре;
 - live-BYPASS появляется в скрипте, только если в цепочке есть хотя бы один
   включённый этап обработки (иначе обход уже и так полный);
-- `buffer(proc)` во второй ветке switch разводит clock-контекст обработанной
-  ветки (иначе Liquidsoap падает с «Cannot unify two nested clocks»).
+- `buffer(...)` в ветках switch разводит clock-контекст: после ffmpeg-графа —
+  перед нативными операторами, во второй ветке BYPASS — иначе Liquidsoap
+  падает с «Cannot unify two nested clocks».
 
 ## Реестр станций
 
@@ -270,8 +292,10 @@ python tests\sandbox_liquidsoap.py     :: Этап 2: FFmpeg-станция + Li
   не вставляет динамические in-band метаданные. У Liquidsoap-воркеров метаданные идут
   сквозь конвейер автоматически и публикуются клиентом `output.icecast` самим сервером.
 - Telnet API воркера поднят: живая подстройка усиления и полос EQ (`/adjust`,
-  кнопка «⚡ Живьём», слайдеры EQ) и живой BYPASS (`/bypass`, переключатель
-  в шапке) — см. раздел выше.
+  кнопка «⚡ Живьём», слайдеры EQ), живые параметры компрессора и лимитера,
+  живое включение/выключение секций (галочки EQ, усиления, компрессора,
+  loudnorm, лимитера) и живой BYPASS (`/bypass`, переключатель в шапке) —
+  см. раздел выше.
 - В песочнице Liquidsoap-потребление источника идёт быстрее realtime
   (авто-синхронизация под медленный источник не срабатывает) — компенсируется
   троттлингом источника в тесте. Против реального Icecast проверено не было.

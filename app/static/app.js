@@ -528,12 +528,14 @@ $("btnStart").addEventListener("click", async () => {
 
 $("btnRestart").addEventListener("click", async () => {
   if (!(await saveSelected())) return;
+  stopListen(); // поток воркера сейчас разорвётся — гасим мониторинг сами
   const data = await postJSON("/api/streams/" + encodeURIComponent(currentStationId) + "/restart");
   toast(data.message, !data.ok);
   pollHealth();
 });
 
 $("btnStop").addEventListener("click", async () => {
+  stopListen();
   const data = await postJSON("/api/streams/" + encodeURIComponent(currentStationId) + "/stop");
   toast(data.message, !data.ok);
   pollHealth();
@@ -557,6 +559,9 @@ $("btnClearLog").addEventListener("click", () => {
 const audio = new Audio();
 audio.preload = "none";
 let listening = null; // "input" | "output" | null
+// Поколение прослушки: переключение/остановка инкрементируют его, чтобы
+// асинхронные события старого потока (error/ended) не давали ложных тостов.
+let listenGeneration = 0;
 const LISTEN_HINT = "Мониторинг идёт отдельным MP3-каналом (задержка 1–3 с) — только для сравнения звука на слух";
 
 function updateListenUI() {
@@ -570,6 +575,7 @@ function updateListenUI() {
 
 function stopListen() {
   listening = null;
+  listenGeneration++;
   audio.pause();
   audio.removeAttribute("src");
   audio.load();
@@ -578,6 +584,7 @@ function stopListen() {
 
 async function toggleListen(which) {
   if (listening === which) { stopListen(); return; }
+  const gen = ++listenGeneration;
   audio.pause();
   audio.volume = $("listen_vol").value / 100;
   audio.src = "/api/streams/" + encodeURIComponent(currentStationId) +
@@ -591,6 +598,11 @@ async function toggleListen(which) {
   try {
     await playPromise;
   } catch (e) {
+    // AbortError — play() отменён нашим же pause()/сменой src: быстрый
+    // переключение A↔B или повторный клик прерывает неустановившееся
+    // воспроизведение. Это не сбой потока — молча игнорируем.
+    if (e && e.name === "AbortError") return;
+    if (gen !== listenGeneration) return; // поток уже не актуален
     toast((saved
       ? "Браузер заблокировал воспроизведение"
       : "Настройки не сохранены — воспроизведение отменено") +
@@ -603,9 +615,13 @@ $("btnListenInput").addEventListener("click", () => toggleListen("input"));
 $("btnListenOutput").addEventListener("click", () => toggleListen("output"));
 $("btnListenStop").addEventListener("click", stopListen);
 audio.addEventListener("error", () => {
-  if (listening) { toast("Поток недоступен — проверьте источник/выход", true); stopListen(); }
+  // Событие от устаревшего/самого остановленного потока — не ошибка эфира.
+  if (listening && listenGeneration > 0) {
+    toast("Поток недоступен — проверьте источник/выход", true);
+    stopListen();
+  }
 });
-audio.addEventListener("ended", stopListen);
+audio.addEventListener("ended", () => { listenGeneration++; stopListen(); });
 $("listen_vol").addEventListener("input", () => {
   audio.volume = $("listen_vol").value / 100;
   $("listen_vol_val").textContent = $("listen_vol").value + "%";
@@ -740,6 +756,37 @@ function scheduleDynLive() {
 for (const id of ["comp_threshold", "comp_ratio", "comp_attack", "comp_release",
                   "comp_makeup", "lim_ceiling_db", "lim_attack", "lim_release"]) {
   $(id).addEventListener("input", scheduleDynLive);
+}
+
+/* Живое включение/выключение секций (как BYPASS): для работающей
+   Liquidsoap-станции галочка секции сразу шлёт переключение воркеру;
+   значение одновременно сохраняется в реестре. Секция, выключенная при
+   старте воркера, включится после его перезапуска — бэкенд ответит
+   понятным сообщением. */
+const SECTION_BY_CHECKBOX = {
+  eq_enabled: "equalizer",
+  gain_enabled: "gain",
+  comp_enabled: "compressor",
+  ln_enabled: "loudnorm",
+  lim_enabled: "limiter",
+};
+for (const [checkboxId, section] of Object.entries(SECTION_BY_CHECKBOX)) {
+  $(checkboxId).addEventListener("change", async () => {
+    if (!currentStationId) return;
+    if ($("engine").value !== "liquidsoap" || !currentRunning) return;
+    const enabled = $(checkboxId).checked;
+    try {
+      const res = await fetch("/api/streams/" + encodeURIComponent(currentStationId) + "/adjust", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sections: { [section]: enabled } }),
+      });
+      const data = await res.json();
+      toast(data.ok ? data.message : (data.error || "Не удалось переключить секцию"), !data.ok);
+    } catch (e) {
+      toast("Не удалось переключить секцию", true);
+    }
+  });
 }
 
 /* Живой BYPASS: для работающей Liquidsoap-станции переключатель шлёт

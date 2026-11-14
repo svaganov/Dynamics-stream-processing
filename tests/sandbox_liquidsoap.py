@@ -355,6 +355,55 @@ class LiquidsoapSandboxTest(unittest.TestCase):
         body = self.wait_for_body("/station-2", before + 20000)
         self.assertTrue(body.startswith(b"\xff\xf1") or body.startswith(b"\xff\xf9"))
 
+    def test_live_section_toggle_without_restart(self):
+        # station-2 стартует с полной цепочкой: у каждой секции есть свой
+        # живой выключатель panel_<секция>_on. Выключаем компрессор и EQ
+        # через API, убеждаемся, что переменные воркера обновились, значения
+        # сохранились в реестре, а поток идёт дальше без перезапуска.
+        res = self.client.post("/api/streams/" + self.station2_id + "/start").get_json()
+        self.assertTrue(res["ok"], res)
+        self.wait_for_body("/station-2", 20000)
+
+        manager = panel.get_manager(self.station2_id)
+        host_port = manager.telnet_host_port()
+        self.assertIsNotNone(host_port, "telnet-порт воркера не опубликован")
+
+        res = self.client.post(
+            "/api/streams/{}/adjust".format(self.station2_id),
+            json={"sections": {"compressor": False, "equalizer": False}}).get_json()
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(res["mode"], "live")
+
+        out = panel._telnet_command(host_port[0], host_port[1], "var.get panel_comp_on")
+        self.assertEqual(out.strip().splitlines()[0].strip(), "false")
+        out = panel._telnet_command(host_port[0], host_port[1], "var.get panel_eq_on")
+        self.assertEqual(out.strip().splitlines()[0].strip(), "false")
+
+        # Значения сохранились в реестре.
+        station = self.client.get("/api/streams/" + self.station2_id).get_json()["station"]
+        self.assertFalse(station["compressor"]["enabled"])
+        self.assertFalse(station["equalizer"]["enabled"])
+
+        # Поток не прервался: тело наращивается и остаётся ADTS.
+        before = len(bytes(self.icecast.bodies.get("/station-2", b"")))
+        body = self.wait_for_body("/station-2", before + 20000)
+        self.assertTrue(body.startswith(b"\xff\xf1") or body.startswith(b"\xff\xf9"))
+
+        # Возвращаем секции — снова живьём.
+        res = self.client.post(
+            "/api/streams/{}/adjust".format(self.station2_id),
+            json={"sections": {"compressor": True, "equalizer": True}}).get_json()
+        self.assertTrue(res["ok"], res)
+        out = panel._telnet_command(host_port[0], host_port[1], "var.get panel_comp_on")
+        self.assertEqual(out.strip().splitlines()[0].strip(), "true")
+        station = self.client.get("/api/streams/" + self.station2_id).get_json()["station"]
+        self.assertTrue(station["compressor"]["enabled"])
+        self.assertTrue(station["equalizer"]["enabled"])
+
+        before = len(bytes(self.icecast.bodies.get("/station-2", b"")))
+        body = self.wait_for_body("/station-2", before + 20000)
+        self.assertTrue(body.startswith(b"\xff\xf1") or body.startswith(b"\xff\xf9"))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

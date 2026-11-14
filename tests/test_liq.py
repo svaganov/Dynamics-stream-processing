@@ -53,13 +53,14 @@ class LiqGeneratorTest(unittest.TestCase):
         # buffer (развод clock) → limit (PCM, живые геттеры); ветка proc,
         # выход — switch на panel_bypass
         pos_eq = script.index("filter.iir.eq.peak(frequency=31")
-        pos_amp = script.index("proc = amplify(panel_gain, proc)")
-        pos_comp = script.index("compress(threshold=panel_comp_threshold")
-        pos_raw = script.index("ffmpeg.raw.encode.audio")
+        pos_amp = script.index("gain_stage = amplify(panel_gain, s)")
+        pos_comp = script.index("comp_stage = compress(threshold=panel_comp_threshold")
+        pos_raw = script.index("ln_raw = ffmpeg.raw.encode.audio")
         pos_ln = script.index("ffmpeg.filter.loudnorm")
-        pos_dec = script.index("ffmpeg.raw.decode.audio")
-        pos_buf = script.index("proc = buffer(proc)")
-        pos_lim = script.index("limit(threshold=panel_lim_ceiling")
+        pos_dec = script.index("ln_stage = ffmpeg.raw.decode.audio")
+        pos_buf = script.index("ln_stage = buffer(ln_stage)")
+        pos_lim = script.index("lim_stage = limit(threshold=panel_lim_ceiling")
+        pos_proc = script.index("proc = s")
         self.assertEqual(script.count("ffmpeg.raw.encode.audio"), 1)
         self.assertEqual(script.count("ffmpeg.raw.decode.audio"), 1)
         self.assertLess(pos_eq, pos_amp)
@@ -69,11 +70,19 @@ class LiqGeneratorTest(unittest.TestCase):
         self.assertLess(pos_ln, pos_dec)
         self.assertLess(pos_dec, pos_buf)
         self.assertLess(pos_buf, pos_lim)
+        self.assertLess(pos_lim, pos_proc)
+        # живые выключатели секций: bool-переменная на каждую включённую секцию
+        for var in ("panel_eq_on", "panel_gain_on", "panel_comp_on",
+                    "panel_ln_on", "panel_lim_on"):
+            self.assertIn('{0} = interactive.bool("{0}", true)'.format(var), script)
+        # каждая секция — свой switch: 5 секций + финальный BYPASS
+        self.assertEqual(script.count("s = switch(track_sensitive=false, ["), 6)
+        self.assertIn("(panel_comp_on, comp_stage)", script)
+        self.assertIn("({not panel_comp_on()}, s)", script)
         # live-BYPASS: интерактивная переменная + switch «вход ↔ обработка»
         self.assertIn('panel_bypass = interactive.bool("panel_bypass", false)', script)
-        pos_switch = script.index("s = switch(track_sensitive=false, [")
-        self.assertLess(pos_lim, pos_switch)
-        self.assertIn("(panel_bypass, s)", script)
+        pos_switch = script.index("(panel_bypass, s)")
+        self.assertLess(pos_proc, pos_switch)
         self.assertIn("({not panel_bypass()}, buffer(proc))", script)
         # динамика больше НЕ в ffmpeg-графе: acompressor/alimiter заменены
         # нативными compress/limit с геттерами
@@ -109,8 +118,8 @@ class LiqGeneratorTest(unittest.TestCase):
                        loudnorm={"enabled": False},
                        limiter={"enabled": False})
         script = liq.generate_liq_script(cfg)
-        self.assertIn("proc = compress(threshold=panel_comp_threshold", script)
-        self.assertNotIn("limit(", script)
+        self.assertIn("comp_stage = compress(threshold=panel_comp_threshold", script)
+        self.assertNotIn("lim_stage", script)
         self.assertNotIn("ffmpeg.filter", script)
 
     def test_limiter_only_chain(self):
@@ -119,7 +128,7 @@ class LiqGeneratorTest(unittest.TestCase):
                        compressor={"enabled": False},
                        loudnorm={"enabled": False})
         script = liq.generate_liq_script(cfg)
-        self.assertIn("proc = limit(threshold=panel_lim_ceiling", script)
+        self.assertIn("lim_stage = limit(threshold=panel_lim_ceiling", script)
         self.assertNotIn("compress(", script)
         self.assertNotIn("panel_comp_", script)
         self.assertNotIn("ffmpeg.filter", script)
@@ -163,6 +172,21 @@ class LiqGeneratorTest(unittest.TestCase):
         self.assertNotIn("filter.iir.eq.peak", script)
         self.assertNotIn("panel_eq_", script)
 
+    def test_disabled_section_has_no_live_toggle(self):
+        # выключенная при старте секция не получает ни bool-переменной, ни
+        # switch-а — живое включение возможно только для секций, заявленных
+        # в конфигурации воркера (как и живые параметры динамики)
+        cfg = make_cfg(equalizer={"enabled": False, "gains": [1] * 10})
+        script = liq.generate_liq_script(cfg)
+        self.assertNotIn("panel_eq_on", script)
+        self.assertNotIn("eq_stage", script)
+        self.assertNotIn("(panel_eq_on, eq_stage)", script)
+        # остальные включённые секции — со своими выключателями
+        for var in ("panel_gain_on", "panel_comp_on", "panel_ln_on", "panel_lim_on"):
+            self.assertIn('{0} = interactive.bool("{0}", true)'.format(var), script)
+        # переключателей на одну меньше: 4 секции + BYPASS
+        self.assertEqual(script.count("s = switch(track_sensitive=false, ["), 5)
+
     def test_bypass_has_no_filters(self):
         script = liq.generate_liq_script(make_cfg(bypass=True))
         self.assertNotIn("ffmpeg.filter", script)
@@ -194,7 +218,7 @@ class LiqGeneratorTest(unittest.TestCase):
                        loudnorm={"enabled": False},
                        limiter={"enabled": False})
         script = liq.generate_liq_script(cfg)
-        self.assertIn("proc = amplify(panel_gain, s)", script)
+        self.assertIn("gain_stage = amplify(panel_gain, s)", script)
         self.assertNotIn("ffmpeg.filter.create", script)
         self.assertNotIn("ffmpeg.raw", script)
         # даже одиночное усиление оборачивается live-BYPASS
@@ -206,7 +230,7 @@ class LiqGeneratorTest(unittest.TestCase):
         # иначе живое управление panel_gain пропало бы целиком
         cfg = make_cfg(gain={"enabled": True, "db": 0})
         script = liq.generate_liq_script(cfg)
-        self.assertIn("proc = amplify(panel_gain, proc)", script)
+        self.assertIn("gain_stage = amplify(panel_gain, s)", script)
         self.assertIn('interactive.float("panel_gain", 1.0)', script)
 
     def test_password_masked(self):

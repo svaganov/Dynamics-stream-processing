@@ -1157,6 +1157,11 @@ class DockerWorkerManager:
             return False, "telnet: {}".format(exc)
         err = self._telnet_check(outputs)
         if err:
+            # Переменные EQ есть в скрипте воркера, только если EQ был включён
+            # при его старте: иначе подстройка вступит в силу после перезапуска.
+            if "not found" in err.lower():
+                return True, ("EQ сохранён — применится при перезапуске воркера "
+                              "(EQ был выключен при его старте)")
             return False, err
         return True, "EQ подстроен живьём (10 полос)"
 
@@ -1182,6 +1187,12 @@ class DockerWorkerManager:
             return False, "telnet: {}".format(exc)
         err = self._telnet_check(outputs)
         if err:
+            # Переменные блока есть в скрипте воркера, только если блок был
+            # включён при его старте: значения уже сохранены в реестре панелью,
+            # подстройка вступит в силу после перезапуска воркера.
+            if "not found" in err.lower():
+                return True, ("сохранено — применится при перезапуске воркера "
+                              "(блок был выключен при его старте)")
             return False, err
         return True, "подстроено живьём: " + ", ".join(var_values)
 
@@ -1232,6 +1243,37 @@ class DockerWorkerManager:
             return False, lines[0]
         return True, ("BYPASS включён живьём" if enabled
                       else "BYPASS снят живьём")
+
+    def set_section(self, section, enabled):
+        """Живое включение/выключение секции обработки (как BYPASS).
+
+        section — equalizer|gain|compressor|loudnorm|limiter; соответствующая
+        переменная panel_<секция>_on есть в скрипте, только если секция была
+        включена при старте воркера (иначе применится при перезапуске)."""
+        var = liq.SECTION_TOGGLE_VARS.get(section)
+        if var is None:
+            return False, "неизвестная секция: {}".format(section)
+        with self.lock:
+            container = self.container
+        if container is None or not self._is_running(container):
+            return False, "воркер не запущен"
+        host_port = self.telnet_host_port()
+        if host_port is None:
+            return False, "telnet-порт воркера недоступен (удалённый демон Docker?)"
+        value = "true" if enabled else "false"
+        try:
+            out = _telnet_command(host_port[0], host_port[1],
+                                  "var.set {} = {}".format(var, value))
+        except Exception as exc:
+            return False, "telnet: {}".format(exc)
+        lines = out.strip().splitlines()
+        if lines and "error" in lines[0].lower():
+            if "not found" in lines[0].lower():
+                return True, ("секция «{}» сохранена — включится при перезапуске "
+                              "воркера (была выключена при его старте)".format(section))
+            return False, lines[0]
+        return True, "секция «{}» {} живьём".format(
+            section, "включена" if enabled else "выключена")
 
     def dispose(self):
         """Остановка + удаление контейнера (при смене движка или удалении станции)."""
@@ -1603,6 +1645,7 @@ def api_station_adjust(station_id):
     eq_gains = None
     compressor = None
     limiter = None
+    sections = None
     if "gain_db" in body:
         try:
             gain_db = float(body["gain_db"])
@@ -1632,9 +1675,20 @@ def api_station_adjust(station_id):
                 compressor = parsed
             else:
                 limiter = parsed
-    if gain_db is None and eq_gains is None and compressor is None and limiter is None:
+    if "sections" in body:
+        raw = body["sections"]
+        if not isinstance(raw, dict):
+            return jsonify({"ok": False, "error": "sections должен быть объектом {секция: bool}"}), 400
+        unknown = [k for k in raw if k not in liq.SECTION_TOGGLE_VARS]
+        if unknown:
+            return jsonify({"ok": False,
+                            "error": "неизвестные секции: {}".format(", ".join(unknown))}), 400
+        sections = {k: bool(v) for k, v in raw.items()}
+    if gain_db is None and eq_gains is None and compressor is None \
+            and limiter is None and not sections:
         return jsonify({"ok": False, "error":
-                        "укажите gain_db и/или eq_gains и/или compressor и/или limiter"}), 400
+                        "укажите gain_db и/или eq_gains и/или compressor и/или "
+                        "limiter и/или sections"}), 400
     if station.get("engine") != "liquidsoap":
         return jsonify({
             "ok": False,
@@ -1658,13 +1712,19 @@ def api_station_adjust(station_id):
         if not ok:
             return jsonify({"ok": False, "error": msg}), 409
         compressor = clamped
-        message.append("компрессор подстроен живьём")
+        message.append(msg if msg.startswith("сохранено") else "компрессор подстроен живьём")
     if limiter is not None:
         ok, msg, clamped = manager.adjust_limiter(limiter)
         if not ok:
             return jsonify({"ok": False, "error": msg}), 409
         limiter = clamped
-        message.append("лимитер подстроен живьём")
+        message.append(msg if msg.startswith("сохранено") else "лимитер подстроен живьём")
+    if sections:
+        for section, enabled in sections.items():
+            ok, msg = manager.set_section(section, enabled)
+            if not ok:
+                return jsonify({"ok": False, "error": msg}), 409
+            message.append(msg)
     patch = {}
     if gain_db is not None:
         patch["gain"] = {"enabled": True, "db": gain_db}
@@ -1674,6 +1734,8 @@ def api_station_adjust(station_id):
         patch["compressor"] = {"enabled": True, **compressor}
     if limiter is not None:
         patch["limiter"] = {"enabled": True, **limiter}
+    for section, enabled in (sections or {}).items():
+        patch[section] = {"enabled": enabled}
     updated = update_station(station_id, patch)
     return jsonify({
         "ok": True,
@@ -1683,6 +1745,7 @@ def api_station_adjust(station_id):
         "equalizer": updated.get("equalizer"),
         "compressor": updated.get("compressor"),
         "limiter": updated.get("limiter"),
+        "loudnorm": updated.get("loudnorm"),
     })
 
 
