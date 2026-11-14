@@ -94,13 +94,17 @@ class LiquidsoapSandboxTest(unittest.TestCase):
             "icecast": {"host": "127.0.0.1", "port": self.icecast_port, "mount": "/station-1"},
             "autorestart": {"enabled": False, "delay": 1},
         })
-        # station-2 — Liquidsoap-воркер в контейнере, хост — через host.docker.internal
+        # station-2 — Liquidsoap-воркер в контейнере. Адреса источника и
+        # Icecast специально заданы как 127.0.0.1 (типичная конфигурация
+        # пользователя): панель обязана переписать их на host.docker.internal
+        # при генерации скрипта воркера (containerize_loopback), иначе из
+        # контейнера loopback указывал бы на сам контейнер и поток не пошёл.
         created = self.client.post("/api/streams", json={"name": "Радио Liq"}).get_json()["station"]
         self.station2_id = created["id"]
         self.client.put("/api/streams/" + self.station2_id, json={
             "engine": "liquidsoap",
-            "source": {"url": host_url(self.source_port, "/source.mp3"), "reconnect": True, "reconnect_delay_max": 1},
-            "icecast": {"host": HOST_DOCKER_INTERNAL, "port": self.icecast_port, "mount": "/station-2"},
+            "source": {"url": self.source_url("/source.mp3"), "reconnect": True, "reconnect_delay_max": 1},
+            "icecast": {"host": "127.0.0.1", "port": self.icecast_port, "mount": "/station-2"},
             "autorestart": {"enabled": False, "delay": 1},
             "gain": {"enabled": True, "db": 0.0},
             "equalizer": {"enabled": True, "gains": [2, 0, 0, 0, 1, 0, 0, 0, 0, 0]},

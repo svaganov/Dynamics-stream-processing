@@ -209,13 +209,17 @@ def _live_bypass_block():
     """Переключатель «чистый вход ↔ обработка» на интерактивной переменной.
 
     Панель шлёт по telnet «var.set panel_bypass = true|false» — воркер
-    переключает ветку без перезапуска. buffer(proc) разводит clock-контекст:
-    ffmpeg-графы живут в собственном вложенном clock, switch требует единый."""
+    переключает ветку без перезапуска. Ветка «чистый вход» — raw_input
+    (сырой вход до цепочки; важно: s к этому месту уже переприсвоен
+    секционными switch-ами и равен обработанному сигналу). buffer(proc)
+    разводит clock-контекст: ffmpeg-графы живут в собственном вложенном
+    clock, switch требует единый. buffer на ветке raw_input не нужен —
+    сырой вход уже в главном clock."""
     return (
         "# Live BYPASS: «var.set panel_bypass = true|false» по telnet — без перезапуска\n"
         'panel_bypass = interactive.bool("panel_bypass", false)\n'
         "s = switch(track_sensitive=false, [\n"
-        "  (panel_bypass, s),\n"
+        "  (panel_bypass, raw_input),\n"
         "  ({not panel_bypass()}, buffer(proc))\n"
         "])"
     )
@@ -271,7 +275,10 @@ def _processing_block(cfg):
     parts = [
         "# --- цепочка обработки (live-BYPASS через panel_bypass, живые "
         "выключатели секций panel_*_on): EQ → усиление → компрессор → "
-        "loudnorm → лимитер ---",
+        "loudnorm → лимитер ---\n"
+        "# Сырой вход до цепочки — для ветки BYPASS (s дальше переприсваивается "
+        "секционными switch-ами и уже не годится как «чистый вход»)",
+        "raw_input = s",
     ]
 
     def _raw_wrapped(graph_block, comment, src, dst):

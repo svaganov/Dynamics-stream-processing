@@ -452,6 +452,35 @@ class PanelApiTest(unittest.TestCase):
             json={"sections": ["compressor"]})
         self.assertEqual(res.status_code, 400)
 
+    def test_listen_registration_replaces_same_channel(self):
+        # Повторная прослушка того же канала станции гасит прежний
+        # ffmpeg-монитор — иначе дубли копятся на каждый клик «Выход».
+        class FakeProc:
+            def __init__(self):
+                self.killed = False
+
+            def kill(self):
+                self.killed = True
+
+            def wait(self, timeout=None):
+                return 0
+
+        try:
+            p1, p2, p3 = FakeProc(), FakeProc(), FakeProc()
+            panel.register_listener("station-1", p1, "output")
+            panel.register_listener("station-1", p2, "output")
+            self.assertTrue(p1.killed)   # дубликат канала заменён
+            self.assertFalse(p2.killed)
+            # другой канал той же станции живёт независимо
+            panel.register_listener("station-1", p3, "input")
+            self.assertFalse(p2.killed)
+            self.assertFalse(p3.killed)
+            panel.stop_listeners("station-1")
+            self.assertTrue(p2.killed)
+            self.assertTrue(p3.killed)
+        finally:
+            panel.stop_listeners("station-1")
+
     def test_bind_source_mapping_for_containerized_panel(self):        # Панель в контейнере: bind source резолвится демоном на хосте, поэтому
         # WORKER_BIND_ROOT переносит относительный путь скрипта на хостовый корень.
         with mock.patch.object(panel, "WORKER_BIND_ROOT",
@@ -466,6 +495,57 @@ class PanelApiTest(unittest.TestCase):
             self.assertEqual(
                 panel.DockerWorkerManager._bind_source("/x/station.liq"),
                 "/x/station.liq")
+
+    def test_containerize_loopback_rewrites_icecast_and_source(self):
+        # Воркер в контейнере: loopback там — сам контейнер. Icecast и
+        # источник на той же машине переписываются на host.docker.internal,
+        # причём только в копии конфига (реестр не трогаем).
+        cfg = {
+            "source": {"url": "http://127.0.0.1:8000/live?x=1"},
+            "icecast": {"host": "localhost", "port": 8800, "mount": "/m"},
+        }
+        out = panel.containerize_loopback(cfg)
+        self.assertEqual(out["icecast"]["host"], "host.docker.internal")
+        self.assertEqual(out["source"]["url"],
+                         "http://host.docker.internal:8000/live?x=1")
+        # исходный конфиг не изменился
+        self.assertEqual(cfg["icecast"]["host"], "localhost")
+        self.assertEqual(cfg["source"]["url"], "http://127.0.0.1:8000/live?x=1")
+
+    def test_containerize_loopback_keeps_external_hosts(self):
+        cfg = {
+            "source": {"url": "https://radio.example.com/stream.aacp"},
+            "icecast": {"host": "icecast.example-cdn.com", "port": 8443},
+        }
+        out = panel.containerize_loopback(cfg)
+        self.assertEqual(out["icecast"]["host"], "icecast.example-cdn.com")
+        self.assertEqual(out["source"]["url"], "https://radio.example.com/stream.aacp")
+
+    def test_containerize_loopback_preserves_url_userinfo_and_port(self):
+        cfg = {"source": {"url": "http://user:pw@localhost:9000/a"},
+               "icecast": {"host": "127.0.0.1"}}
+        out = panel.containerize_loopback(cfg)
+        self.assertEqual(out["source"]["url"],
+                         "http://user:pw@host.docker.internal:9000/a")
+
+    def test_command_preview_shows_containerized_loopback(self):
+        # предпросмотр скрипта совпадает с реальным: loopback переписан
+        res = self.client.post("/api/streams", json={"name": "Liq"}).get_json()["station"]
+        self.client.put("/api/streams/" + res["id"], json={
+            "engine": "liquidsoap",
+            "icecast": {"host": "127.0.0.1", "port": 8800, "mount": "/t",
+                        "user": "source", "password": "pw"},
+            "source": {"url": "http://127.0.0.1:8000/live"},
+        })
+        data = self.client.post("/api/streams/" + res["id"] + "/command",
+                                json={}).get_json()
+        self.assertIn('host="host.docker.internal"', data["text"])
+        self.assertIn("http://host.docker.internal:8000/live", data["text"])
+        self.assertNotIn("127.0.0.1", data["text"])
+        # реестр при этом хранит адреса как задал пользователь
+        station = self.client.get("/api/streams/" + res["id"]).get_json()["station"]
+        self.assertEqual(station["icecast"]["host"], "127.0.0.1")
+        self.assertEqual(station["source"]["url"], "http://127.0.0.1:8000/live")
 
     def test_adjust_limiter_clamps_and_persists(self):
         station_id, _ = self._make_running_liquidsoap_station()

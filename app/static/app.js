@@ -600,6 +600,7 @@ function updateDashboardCards() {
   for (const card of cards) {
     const health = healthById.get(card.dataset.id) || {};
     const running = Boolean(health.running);
+    card.classList.toggle("running", running);
     card.querySelector(".scard-status").classList.toggle("running", running);
     card.querySelector(".m-status").textContent = running ? "работает" : "остановлено";
     card.querySelector(".m-uptime").textContent =
@@ -806,9 +807,44 @@ function updateListenUI() {
   $("listenStatus").style.color = listening ? "var(--green)" : "";
 }
 
+/* Живой индикатор прослушки: раз в секунду смотрим, движется ли
+   currentTime плеера. Движется — «звук идёт N с» (зелёный): байты дошли
+   до браузера, если звука нет — ищите заглушенную вкладку/микшер.
+   Стоит на месте ≥4 с — «поток не идёт» (красный): проблема в тракте
+   панель→браузер или в источнике. */
+let listenTimer = null;
+let listenLastTime = -1;
+let listenStalledSec = 0;
+
+function stopListenWatchdog() {
+  if (listenTimer) { clearInterval(listenTimer); listenTimer = null; }
+}
+
+function startListenWatchdog() {
+  stopListenWatchdog();
+  listenLastTime = -1;
+  listenStalledSec = 0;
+  listenTimer = setInterval(() => {
+    if (!listening) { stopListenWatchdog(); return; }
+    const t = audio.currentTime;
+    if (t === listenLastTime) listenStalledSec++;
+    else listenStalledSec = 0;
+    listenLastTime = t;
+    const base = listening === "input" ? "входной поток (исходный)" : "выходной поток (после обработки)";
+    if (listenStalledSec >= 4) {
+      $("listenStatus").textContent = "Играет: " + base + " · поток не идёт " + listenStalledSec + " с";
+      $("listenStatus").style.color = "var(--red)";
+    } else {
+      $("listenStatus").textContent = "Играет: " + base + " · звук идёт " + Math.floor(t) + " с";
+      $("listenStatus").style.color = "var(--green)";
+    }
+  }, 1000);
+}
+
 function stopListen() {
   listening = null;
   listenGeneration++;
+  stopListenWatchdog();
   audio.pause();
   audio.removeAttribute("src");
   audio.load();
@@ -824,6 +860,7 @@ async function toggleListen(which) {
     "/listen/" + which + "?t=" + Date.now();
   listening = which;
   updateListenUI();
+  startListenWatchdog();
   // play() вызываем синхронно, в том же жесте клика: после любого await
   // браузер считает жест потраченным и блокирует автовоспроизведение.
   const playPromise = audio.play();

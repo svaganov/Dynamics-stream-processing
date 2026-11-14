@@ -79,11 +79,16 @@ class LiqGeneratorTest(unittest.TestCase):
         self.assertEqual(script.count("s = switch(track_sensitive=false, ["), 6)
         self.assertIn("(panel_comp_on, comp_stage)", script)
         self.assertIn("({not panel_comp_on()}, s)", script)
-        # live-BYPASS: интерактивная переменная + switch «вход ↔ обработка»
+        # live-BYPASS: интерактивная переменная + switch «вход ↔ обработка»;
+        # ветка «чистый вход» — raw_input (сырой вход до цепочки), а НЕ s:
+        # s к этому месту уже переприсвоен секционными switch-ами (регрессия)
         self.assertIn('panel_bypass = interactive.bool("panel_bypass", false)', script)
-        pos_switch = script.index("(panel_bypass, s)")
+        pos_switch = script.index("(panel_bypass, raw_input)")
         self.assertLess(pos_proc, pos_switch)
         self.assertIn("({not panel_bypass()}, buffer(proc))", script)
+        # raw_input захватывается ДО первого секционного switch
+        pos_raw = script.index("raw_input = s")
+        self.assertLess(pos_raw, script.index("s = switch(track_sensitive=false, ["))
         # динамика больше НЕ в ffmpeg-графе: acompressor/alimiter заменены
         # нативными compress/limit с геттерами
         self.assertNotIn("ffmpeg.filter.acompressor", script)
@@ -223,6 +228,7 @@ class LiqGeneratorTest(unittest.TestCase):
         self.assertNotIn("ffmpeg.raw", script)
         # даже одиночное усиление оборачивается live-BYPASS
         self.assertIn('panel_bypass = interactive.bool("panel_bypass", false)', script)
+        self.assertIn("(panel_bypass, raw_input)", script)
         self.assertIn("({not panel_bypass()}, buffer(proc))", script)
 
     def test_zero_gain_stays_live_controllable(self):

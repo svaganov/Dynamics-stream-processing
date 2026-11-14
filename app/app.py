@@ -914,6 +914,42 @@ def _telnet_command(host, port, command, timeout=4.0):
     return _telnet_session(host, port, [command], timeout=timeout)[0]
 
 
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1", "0.0.0.0")
+
+
+def containerize_loopback(cfg):
+    """Переписывает loopback-адреса конфига воркера на host.docker.internal.
+
+    Воркер живёт в контейнере: 127.0.0.1/localhost внутри контейнера — это
+    сам контейнер, а не хост панели. Чтобы Icecast и источники, работающие
+    на той же машине, оставались достижимыми, в сгенерированный скрипт
+    подставляем host.docker.internal (контейнер создаётся с extra_hosts
+    host-gateway). Реестр станций не меняется — возвращается глубокая копия;
+    правятся icecast.host и hostname source.url.
+    """
+    cfg = copy.deepcopy(cfg)
+    ice = cfg.get("icecast")
+    if isinstance(ice, dict) and str(ice.get("host", "")).lower() in LOOPBACK_HOSTS:
+        ice["host"] = "host.docker.internal"
+    source = cfg.get("source")
+    url = (source or {}).get("url", "")
+    if url:
+        parts = urllib.parse.urlsplit(url)
+        if (parts.hostname or "").lower() in LOOPBACK_HOSTS:
+            userinfo = ""
+            if parts.username:
+                userinfo = parts.username
+                if parts.password:
+                    userinfo += ":" + parts.password
+                userinfo += "@"
+            netloc = userinfo + "host.docker.internal"
+            if parts.port:
+                netloc += ":{}".format(parts.port)
+            source["url"] = urllib.parse.urlunsplit(
+                (parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+    return cfg
+
+
 class DockerWorkerManager:
     """Менеджер станции на движке Liquidsoap: один Docker-контейнер на станцию.
 
@@ -997,7 +1033,10 @@ class DockerWorkerManager:
         with self.lock:
             if self.container is not None and self._is_running(self.container):
                 return False, "воркер уже запущен"
-        script = liq.generate_liq_script(cfg)
+        # loopback-адреса (Icecast/источник на этой же машине) недостижимы
+        # из контейнера — переписываем на host.docker.internal (только в
+        # скрипте; реестр хранит адреса как задал пользователь)
+        script = liq.generate_liq_script(containerize_loopback(cfg))
         script_path = self._script_path()
         with open(script_path, "w", encoding="utf-8") as fh:
             fh.write(script)
@@ -1438,18 +1477,26 @@ def stop_and_forget_station(station_id):
 
 # A/B-прослушки отделены от основного pipeline: они живут, пока клиент слушает
 # HTTP-ответ, и принудительно останавливаются при удалении станции.
+# Ключ — (станция, канал input/output): повторная прослушка того же канала
+# заменяет предыдущую, чтобы ffmpeg-мониторы не плодились дублями.
 _listeners_lock = threading.Lock()
 _listeners = {}
 
 
-def register_listener(station_id, proc):
-    key = station_id or "__legacy__"
+def register_listener(station_id, proc, which):
+    key = (station_id or "__legacy__", which)
     with _listeners_lock:
+        old = list(_listeners.pop(key, set()))
         _listeners.setdefault(key, set()).add(proc)
+    for old_proc in old:
+        try:
+            old_proc.kill()
+        except OSError:
+            pass
 
 
-def unregister_listener(station_id, proc):
-    key = station_id or "__legacy__"
+def unregister_listener(station_id, proc, which):
+    key = (station_id or "__legacy__", which)
     with _listeners_lock:
         procs = _listeners.get(key)
         if procs is not None:
@@ -1459,9 +1506,10 @@ def unregister_listener(station_id, proc):
 
 
 def stop_listeners(station_id):
-    key = station_id or "__legacy__"
+    key_id = station_id or "__legacy__"
     with _listeners_lock:
-        procs = list(_listeners.pop(key, set()))
+        keys = [k for k in _listeners if k[0] == key_id]
+        procs = [p for k in keys for p in _listeners.pop(k)]
     for proc in procs:
         try:
             proc.kill()
@@ -1623,7 +1671,8 @@ def api_station_command(station_id):
         station = _normalize_station(_deep_merge(copy.deepcopy(station), body))
     settings = load_streams()["settings"]
     if station.get("engine") == "liquidsoap":
-        script = liq.generate_liq_script(station_runtime_config(station, settings))
+        script = liq.generate_liq_script(
+            containerize_loopback(station_runtime_config(station, settings)))
         return jsonify({"cmd": [], "text": liq.mask_liq_script(script, station)})
     cmd = build_command(station_runtime_config(station, settings))
     return jsonify({"cmd": masked_command(cmd), "text": " ".join(masked_command(cmd))})
@@ -1936,7 +1985,7 @@ def _listen_response(cfg, which, station_id=None):
                                 stderr=subprocess.DEVNULL, **kwargs)
     except OSError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 500
-    register_listener(station_id, proc)
+    register_listener(station_id, proc, which)
 
     @stream_with_context
     def generate():
@@ -1953,7 +2002,7 @@ def _listen_response(cfg, which, station_id=None):
                 proc.kill()
             except OSError:
                 pass
-            unregister_listener(station_id, proc)
+            unregister_listener(station_id, proc, which)
 
     return Response(generate(), mimetype="audio/mpeg", headers={
         "Cache-Control": "no-cache, no-store",
