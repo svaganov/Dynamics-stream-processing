@@ -4,6 +4,8 @@ const $ = (id) => document.getElementById(id);
 
 /* ---------- tabs ---------- */
 
+const TABS = ["processing", "output", "system"];
+
 function activateTab(name) {
   const tab = document.querySelector('.nav-tab[data-tab="' + name + '"]');
   if (!tab) return;
@@ -19,10 +21,58 @@ function activateTab(name) {
 document.querySelectorAll(".nav-tab").forEach((tab) => {
   tab.addEventListener("click", () => {
     activateTab(tab.dataset.tab);
-    history.replaceState(null, "", "#" + tab.dataset.tab);
+    if (currentStationId) {
+      history.replaceState(null, "",
+        "#/s/" + encodeURIComponent(currentStationId) + "/" + tab.dataset.tab);
+    }
   });
 });
-if (location.hash) activateTab(location.hash.slice(1));
+
+/* ---------- router: дашборд потоков ↔ страница станции ---------- */
+
+function currentView() {
+  return document.body.dataset.view === "station" ? "station" : "dashboard";
+}
+
+function showDashboard() {
+  stopListen();
+  document.body.dataset.view = "dashboard";
+  renderDashboard();
+}
+
+function showStation(stationId, tab) {
+  document.body.dataset.view = "station";
+  if (stationId && stationId !== currentStationId) selectStation(stationId);
+  updateStationHeader();
+  activateTab(TABS.includes(tab) ? tab : "processing");
+}
+
+function applyRoute() {
+  const hash = location.hash || "#/";
+  const m = hash.match(/^#\/s\/([^/]+)(?:\/(\w+))?/);
+  if (m) {
+    const id = decodeURIComponent(m[1]);
+    if (stationMap.has(id)) {
+      showStation(id, m[2]);
+      return;
+    }
+    history.replaceState(null, "", "#/"); // станция удалена — на дашборд
+    showDashboard();
+    return;
+  }
+  const legacy = hash.match(/^#(processing|output|system)$/);
+  if (legacy && streamsDoc.streams.length) {
+    // старый формат адреса вкладки — конвертируем в маршрут станции
+    const id = currentStationId || streamsDoc.streams[0].id;
+    history.replaceState(null, "",
+      "#/s/" + encodeURIComponent(id) + "/" + legacy[1]);
+    showStation(id, legacy[1]);
+    return;
+  }
+  showDashboard();
+}
+
+window.addEventListener("hashchange", applyRoute);
 
 /* ---------- multi-station state ---------- */
 
@@ -381,6 +431,183 @@ function updateStationHeader() {
   $("btnStop").disabled = !hasStation;
   $("rpStationName").textContent = station ? station.name : "—";
   $("rpStationId").textContent = station ? "· " + station.id : "";
+  $("stName").textContent = station ? station.name : "—";
+  $("stId").textContent = station ? "· " + station.id : "";
+}
+
+/* ---------- dashboard: карточки потоков ---------- */
+
+function outputUrlOf(st) {
+  const ice = st.icecast || {};
+  return "icecast://" + ice.host + ":" + ice.port + "/" +
+    String(ice.mount || "").replace(/^\/+/, "");
+}
+
+function chainStepsOf(cfg) {
+  if (cfg.bypass) return null;
+  const eq = cfg.equalizer || {}, gain = cfg.gain || {}, comp = cfg.compressor || {};
+  const ln = cfg.loudnorm || {}, lim = cfg.limiter || {};
+  return [
+    { name: "EQ", on: eq.enabled && (eq.gains || []).some((g) => g !== 0) },
+    { name: "GAIN", on: gain.enabled && parseFloat(gain.db) !== 0 },
+    { name: "COMP", on: Boolean(comp.enabled) },
+    { name: "LUFS", on: Boolean(ln.enabled) },
+    { name: "LIM", on: Boolean(lim.enabled) },
+  ];
+}
+
+function scardUrl(label, value) {
+  const row = document.createElement("div");
+  row.className = "scard-url";
+  const k = document.createElement("span");
+  k.className = "k";
+  k.textContent = label;
+  const v = document.createElement("span");
+  v.className = "v";
+  v.textContent = value || "—";
+  v.title = value || "";
+  row.append(k, v);
+  return row;
+}
+
+function scardBtn(cls, label, act, id) {
+  const b = document.createElement("button");
+  b.className = cls;
+  b.textContent = label;
+  b.dataset.act = act;
+  b.addEventListener("click", (e) => {
+    e.stopPropagation(); // кнопка не должна проваливать в страницу станции
+    dashAction(act, id);
+  });
+  return b;
+}
+
+async function dashAction(act, id) {
+  if (act === "restart") stopListen();
+  const data = await postJSON("/api/streams/" + encodeURIComponent(id) + "/" + act);
+  toast(data.message || (data.ok ? "Готово" : "Ошибка"), !data.ok);
+  pollHealth();
+}
+
+function renderDashboard() {
+  const grid = $("dashGrid");
+  grid.innerHTML = "";
+  if (!streamsDoc.streams.length) {
+    const empty = document.createElement("div");
+    empty.className = "dash-empty";
+    empty.textContent = "Потоков нет — нажмите «+ Поток», чтобы добавить первый";
+    grid.appendChild(empty);
+    return;
+  }
+  for (const st of streamsDoc.streams) {
+    const health = healthById.get(st.id) || {};
+    const card = document.createElement("div");
+    card.className = "scard";
+    card.dataset.id = st.id;
+    card.tabIndex = 0;
+    card.setAttribute("role", "button");
+    card.title = "Открыть настройки потока";
+
+    const head = document.createElement("div");
+    head.className = "scard-head";
+    const dot = document.createElement("span");
+    dot.className = "scard-status";
+    const name = document.createElement("span");
+    name.className = "scard-name";
+    name.textContent = st.name;
+    const sid = document.createElement("span");
+    sid.className = "scard-id";
+    sid.textContent = st.id;
+    const eng = document.createElement("span");
+    eng.className = "scard-engine";
+    eng.textContent = st.engine || "ffmpeg";
+    head.append(dot, name, sid, eng);
+
+    const urls = document.createElement("div");
+    urls.className = "scard-urls";
+    urls.appendChild(scardUrl("ВХОД", (st.source && st.source.url) || "—"));
+    urls.appendChild(scardUrl("ВЫХОД", outputUrlOf(st)));
+
+    const chain = document.createElement("div");
+    chain.className = "scard-chain";
+    const steps = chainStepsOf(st);
+    if (!steps) {
+      const chip = document.createElement("span");
+      chip.className = "chip bypass";
+      chip.textContent = "BYPASS — ОБХОД";
+      chain.appendChild(chip);
+    } else {
+      steps.forEach((s, i) => {
+        if (i > 0) {
+          const arr = document.createElement("span");
+          arr.className = "arr";
+          arr.textContent = "→";
+          chain.appendChild(arr);
+        }
+        const chip = document.createElement("span");
+        chip.className = "chip" + (s.on ? " on" : "");
+        chip.textContent = s.name;
+        chain.appendChild(chip);
+      });
+    }
+
+    const meta = document.createElement("div");
+    meta.className = "scard-meta";
+    const mStatus = document.createElement("span");
+    mStatus.className = "m-status";
+    const mUptime = document.createElement("span");
+    mUptime.className = "m-uptime";
+    const mRestarts = document.createElement("span");
+    mRestarts.className = "m-restarts";
+    meta.append(mStatus, mUptime, mRestarts);
+    if (st.bypass) {
+      const b = document.createElement("span");
+      b.className = "bypass";
+      b.textContent = "BYPASS";
+      meta.appendChild(b);
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "scard-actions";
+    actions.appendChild(scardBtn("btn primary", "▶ Старт", "start", st.id));
+    actions.appendChild(scardBtn("btn", "⟳ Перезапуск", "restart", st.id));
+    actions.appendChild(scardBtn("btn danger", "■ Стоп", "stop", st.id));
+
+    card.append(head, urls, chain, meta, actions);
+    card.addEventListener("click", () => {
+      location.hash = "#/s/" + encodeURIComponent(st.id) + "/processing";
+    });
+    card.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); card.click(); }
+    });
+    grid.appendChild(card);
+  }
+  updateDashboardCards();
+}
+
+/* Живое обновление карточек без пересоздания DOM (иначе поллинг каждые
+   2 с съедал бы наведение и клики). Структуру перестраиваем, только если
+   состав станций изменился. */
+function updateDashboardCards() {
+  if (currentView() !== "dashboard") return;
+  const grid = $("dashGrid");
+  const cards = Array.from(grid.querySelectorAll(".scard"));
+  const ids = streamsDoc.streams.map((s) => s.id);
+  if (cards.length !== ids.length || cards.some((c, i) => c.dataset.id !== ids[i])) {
+    renderDashboard();
+    return;
+  }
+  for (const card of cards) {
+    const health = healthById.get(card.dataset.id) || {};
+    const running = Boolean(health.running);
+    card.querySelector(".scard-status").classList.toggle("running", running);
+    card.querySelector(".m-status").textContent = running ? "работает" : "остановлено";
+    card.querySelector(".m-uptime").textContent =
+      running ? "аптайм " + fmtUptime(health.uptime || 0) : "";
+    card.querySelector(".m-restarts").textContent = "рестартов " + (health.restarts || 0);
+    card.querySelector('[data-act="start"]').disabled = running;
+    card.querySelector('[data-act="stop"]').disabled = !running;
+  }
 }
 
 async function loadStreams(selectId) {
@@ -415,6 +642,8 @@ function selectStation(stationId) {
 
 $("stationSelect").addEventListener("change", (e) => selectStation(e.target.value));
 
+$("btnBack").addEventListener("click", () => { location.hash = "#/"; });
+
 $("btnAddStation").addEventListener("click", async () => {
   const name = prompt("Имя новой станции:", "Радио " + (streamsDoc.streams.length + 1));
   if (name === null) return;
@@ -432,6 +661,8 @@ $("btnAddStation").addEventListener("click", async () => {
     drafts.delete(data.station.id);
     await loadStreams(data.station.id);
     toast("Станция добавлена");
+    // новый поток — сразу проваливаемся в его настройки
+    location.hash = "#/s/" + encodeURIComponent(data.station.id) + "/processing";
   } catch (e) {
     toast("Не удалось добавить станцию", true);
   }
@@ -459,6 +690,8 @@ $("btnDeleteStation").addEventListener("click", async () => {
     drafts.delete(station.id);
     await loadStreams();
     toast("Станция удалена");
+    // после удаления — назад на дашборд
+    if (currentView() === "station") location.hash = "#/";
   } catch (e) {
     toast("Не удалось удалить станцию", true);
   }
@@ -823,7 +1056,10 @@ async function pollHealth() {
     lastHealth = await (await fetch("/api/health")).json();
     healthById = new Map(lastHealth.stations.map((s) => [s.id, s]));
     const counts = lastHealth.counts;
-    $("rpSummary").textContent = counts.running + " работает · " + counts.stopped + " остановлено";
+    const summary = counts.running + " работает · " + counts.stopped + " остановлено";
+    $("rpSummary").textContent = summary;
+    $("dashSummary").innerHTML = "<b>" + counts.running + "</b> работает · " + counts.stopped + " остановлено";
+    updateDashboardCards();
 
     if (currentStationId) {
       const st = await (await fetch("/api/streams/" + encodeURIComponent(currentStationId) + "/status")).json();
@@ -887,6 +1123,7 @@ document.querySelectorAll('.field input[type="range"], .listen-row input[type="r
   } catch (e) {
     toast("Не удалось загрузить реестр станций", true);
   }
+  applyRoute();
   pollHealth();
   pollLogs();
 })();

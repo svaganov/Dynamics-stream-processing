@@ -420,13 +420,63 @@
     header .btn { padding: 7px 10px; }
   }
 
+  /* ---------- views: дашборд потоков ↔ страница станции ---------- */
+  body[data-view="dashboard"] .only-station { display: none !important; }
+  body[data-view="station"] .only-dashboard { display: none !important; }
+
+  .st-name {
+    font-size: 13px; font-weight: 700; color: var(--text);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 300px;
+  }
+  .st-name .id { color: var(--text-dim); font-weight: 400; font-size: 11px; }
+
+  .dash-summary { color: var(--text-dim); font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; }
+  .dash-summary b { color: var(--green); }
+
+  /* ---------- dashboard grid ---------- */
+  #viewDashboard { max-width: 1560px; margin: 0 auto; padding: 16px; }
+  .dash-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 16px;
+  }
+  .scard {
+    background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 14px; cursor: pointer;
+    display: flex; flex-direction: column; gap: 10px;
+    transition: border-color 0.15s ease, transform 0.1s ease;
+  }
+  .scard:hover { border-color: rgba(67, 198, 221, 0.5); }
+  .scard:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .scard-head { display: flex; align-items: center; gap: 10px; min-width: 0; }
+  .scard-status { flex: none; width: 9px; height: 9px; border-radius: 50%; background: var(--text-dim); }
+  .scard-status.running { background: var(--green); animation: pulse 1.5s ease-in-out infinite; }
+  .scard-name { font-weight: 700; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .scard-id { color: var(--text-dim); font-size: 10.5px; flex: none; }
+  .scard-engine {
+    margin-left: auto; flex: none;
+    font-size: 9.5px; letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--text-dim); border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px;
+  }
+  .scard-urls { display: flex; flex-direction: column; gap: 4px; font-size: 11px; }
+  .scard-url { display: flex; gap: 8px; min-width: 0; }
+  .scard-url .k { color: var(--text-dim); font-size: 9.5px; letter-spacing: 0.1em; flex: none; width: 44px; padding-top: 1px; }
+  .scard-url .v { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .scard-chain { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+  .scard-chain .arr { color: var(--text-dim); font-size: 10px; }
+  .scard-meta { display: flex; gap: 12px; flex-wrap: wrap; color: var(--text-dim); font-size: 10.5px; }
+  .scard-meta .bypass { color: var(--yellow); }
+  .scard-actions { display: flex; gap: 8px; margin-top: 2px; }
+  .scard-actions .btn { padding: 5px 11px; font-size: 11px; margin: 0; }
+  .dash-empty { color: var(--text-dim); padding: 48px 0; text-align: center; grid-column: 1 / -1; }
+
   @media (prefers-reduced-motion: reduce) {
     .rp-status.running .dot { animation: none; }
     * { transition-duration: 0.01ms !important; }
   }
 </style>
 </head>
-<body>
+<body data-view="dashboard">
 
 <header>
   <div class="logo">
@@ -439,31 +489,41 @@
     FFMPEG <span class="arrow">→</span> ICECAST
   </div>
 
-  <nav class="nav-tabs" role="tablist" aria-label="Разделы панели">
+  <button class="btn only-station" id="btnBack" title="К списку потоков">← Потоки</button>
+  <span class="st-name only-station"><span id="stName">—</span> <span class="id" id="stId"></span></span>
+
+  <nav class="nav-tabs only-station" role="tablist" aria-label="Разделы панели">
     <button class="nav-tab active" role="tab" aria-selected="true" data-tab="processing">Обработка</button>
     <button class="nav-tab" role="tab" aria-selected="false" data-tab="output">Вывод и контроль</button>
     <button class="nav-tab" role="tab" aria-selected="false" data-tab="system">Команда и лог</button>
   </nav>
 
+  <span class="dash-summary only-dashboard" id="dashSummary">0 работает · 0 остановлено</span>
+
   <div class="station-picker" aria-label="Станции">
-    <select id="stationSelect" aria-label="Выбранная станция"></select>
+    <select id="stationSelect" aria-label="Выбранная станция" hidden></select>
     <button class="btn" id="btnAddStation" title="Добавить поток">+ Поток</button>
-    <button class="btn danger" id="btnDeleteStation" title="Удалить выбранную станцию">Удалить</button>
+    <button class="btn danger only-station" id="btnDeleteStation" title="Удалить выбранную станцию">Удалить</button>
   </div>
 
   <div class="spacer"></div>
 
-  <label class="bypass-toggle" id="bypassToggle" title="Обход всей обработки: поток идёт без EQ, усиления, компрессора, нормализации и лимитера. Для работающего Liquidsoap-воркера переключается живьём — без перезапуска">
+  <label class="bypass-toggle only-station" id="bypassToggle" title="Обход всей обработки: поток идёт без EQ, усиления, компрессора, нормализации и лимитера. Для работающего Liquidsoap-воркера переключается живьём — без перезапуска">
     <span class="switch"><input type="checkbox" id="bypass"><span class="track"></span></span>
     BYPASS
   </label>
 
-  <button class="btn primary" id="btnStart">▶ Старт</button>
-  <button class="btn" id="btnRestart">⟳ Перезапуск</button>
-  <button class="btn danger" id="btnStop">■ Стоп</button>
+  <button class="btn primary only-station" id="btnStart">▶ Старт</button>
+  <button class="btn only-station" id="btnRestart">⟳ Перезапуск</button>
+  <button class="btn danger only-station" id="btnStop">■ Стоп</button>
 </header>
 
-<div class="layout">
+<!-- ======================== VIEW: ДАШБОРД ПОТОКОВ ======================== -->
+<div id="viewDashboard" class="only-dashboard">
+  <div class="dash-grid" id="dashGrid"></div>
+</div>
+
+<div class="layout only-station">
   <main>
     <!-- ======================== TAB: ОБРАБОТКА ======================== -->
     <div class="tab-page active" id="tab-processing" role="tabpanel">
