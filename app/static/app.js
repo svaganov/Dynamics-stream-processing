@@ -645,6 +645,13 @@ $("stationSelect").addEventListener("change", (e) => selectStation(e.target.valu
 
 $("btnBack").addEventListener("click", () => { location.hash = "#/"; });
 
+// Строка «Выход» в Stream Info — клик открывает форму редактирования Icecast
+$("rpOutputRow").addEventListener("click", () => {
+  if (currentStationId) {
+    location.hash = "#/s/" + encodeURIComponent(currentStationId) + "/output";
+  }
+});
+
 $("btnAddStation").addEventListener("click", async () => {
   const name = prompt("Имя новой станции:", "Радио " + (streamsDoc.streams.length + 1));
   if (name === null) return;
