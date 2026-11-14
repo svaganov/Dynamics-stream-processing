@@ -818,6 +818,11 @@ class ProcessManager:
             "detail": version or "FFmpeg",
             "ffmpeg_found": path is not None,
             "ffmpeg_version": version,
+            # FFmpeg завершается при обрыве/отказе подключения к Icecast:
+            # работающий процесс — признак установленного подключения
+            "icecast_connected": True if running else None,
+            # и по входу: фатальный обрыв источника завершает процесс
+            "input_connected": True if running else None,
         }
 
     def ffmpeg_info(self, cfg=None):
@@ -904,6 +909,12 @@ def _telnet_session(host, port, commands, timeout=4.0):
                     break
                 buf += chunk
             outputs.append(re.sub(rb"\xff...", b"", buf).decode("utf-8", "replace"))
+        # прощаемся корректно — иначе воркер пишет в лог
+        # «Client disconnected without saying goodbye» на каждый опрос
+        try:
+            sock.sendall(b"quit\r\n")
+        except OSError:
+            pass
     finally:
         sock.close()
     return outputs
@@ -972,6 +983,10 @@ class DockerWorkerManager:
         self.next_log_id = 1
         self._run_cfg = None
         self._client = None
+        # Постоянная telnet-сессия опроса флага подключения выхода: без неё
+        # каждый опрос статуса (2 с) порождал пару «New client / disconnected»
+        # в логе воркера и вымывал из него полезные строки.
+        self._ice_sess = None  # (host, port, socket)
         threading.Thread(target=self._watchdog, daemon=True).start()
 
     # ------------------------------------------------------------- logging
@@ -1090,6 +1105,7 @@ class DockerWorkerManager:
         with self.lock:
             self.manual_stop = True
             container = self.container
+        self._ice_sess_close()
         if container is None or not self._is_running(container):
             return False, "процесс не запущен"
         self.log("[panel] остановка воркера {}...".format(self.container_name))
@@ -1144,6 +1160,104 @@ class DockerWorkerManager:
         if not port:
             return None
         return host, int(port)
+
+    def _ice_sess_close(self):
+        with self.lock:
+            sess = self._ice_sess
+            self._ice_sess = None
+        if sess is not None:
+            try:
+                sess[2].sendall(b"quit\r\n")
+            except OSError:
+                pass
+            try:
+                sess[2].close()
+            except OSError:
+                pass
+
+    def _ice_telnet(self, command):
+        """Команда воркеру по ПОСТОЯННОЙ telnet-сессии.
+
+        Одна сессия на время жизни контейнера: при опросе статуса каждые
+        2 с отдельные подключения засыпали бы лог воркера строками
+        «New client / Client disconnected». Сессия пересоздаётся при обрыве
+        (рестарт воркера, смена опубликованного порта)."""
+        import socket
+        with self.lock:
+            sess = self._ice_sess
+        host_port = self.telnet_host_port()
+        if host_port is None:
+            self._ice_sess_close()
+            raise OSError("telnet-порт воркера недоступен")
+        if sess is None or (sess[0], sess[1]) != host_port:
+            self._ice_sess_close()
+            sock = socket.create_connection(host_port, timeout=4.0)
+            sock.settimeout(0.5)
+            try:
+                sock.recv(65536)  # баннер, если сервер его шлёт
+            except socket.timeout:
+                pass
+            sock.settimeout(4.0)
+            with self.lock:
+                self._ice_sess = (host_port[0], host_port[1], sock)
+            sess = self._ice_sess
+        sock = sess[2]
+        try:
+            sock.sendall(command.encode("utf-8") + b"\r\n")
+            buf = b""
+            while b"END" not in buf:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    raise OSError("telnet-сессия закрыта воркером")
+                buf += chunk
+        except OSError:
+            self._ice_sess_close()  # пересоздастся при следующем опросе
+            raise
+        return re.sub(rb"\xff...", b"", buf).decode("utf-8", "replace")
+
+    def icecast_connected(self):
+        """True/False — состояние подключения выхода к Icecast живьём.
+
+        Читает интерактивный флаг panel_ice_connected воркера (его
+        выставляют on_connect/on_disconnect выхода output.icecast).
+        None — воркер не запущен, telnet недоступен или воркер работает
+        на старом скрипте без флага (статус неизвестен)."""
+        with self.lock:
+            container = self.container
+        if container is None or not self._is_running(container):
+            self._ice_sess_close()
+            return None
+        try:
+            out = self._ice_telnet("var.get panel_ice_connected")
+        except Exception:
+            return None
+        first = (out.strip().splitlines() or [""])[0].strip().lower()
+        if first == "true":
+            return True
+        if first == "false":
+            return False
+        return None  # «variable not found» и т.п. — старый скрипт
+
+    def input_connected(self):
+        """True/False — идёт ли входной поток (input.http подключён к источнику).
+
+        Команда «input.status» отвечает «connected <url>», пока источник
+        на связи; при обрыве — другое состояние. None — воркер не запущен,
+        telnet недоступен или ответ не распознан."""
+        with self.lock:
+            container = self.container
+        if container is None or not self._is_running(container):
+            return None
+        try:
+            out = self._ice_telnet("input.status")
+        except Exception:
+            return None
+        first = (out.strip().splitlines() or [""])[0].strip().lower()
+        if first.startswith("connected"):
+            return True
+        if first and "unknown command" not in first:
+            return False  # connecting/disconnected/buffering — входа нет
+        return None
 
     def adjust_gain(self, db):
         """Живая подстройка усиления через telnet воркера (без перезапуска)."""
@@ -1365,6 +1479,10 @@ class DockerWorkerManager:
             "ffmpeg_found": False,
             "ffmpeg_version": None,
             "container": self.container_name if container is not None else None,
+            # живой флаг on_connect/on_disconnect выхода; None — неизвестно
+            "icecast_connected": self.icecast_connected() if running else None,
+            # input.status источника: connected <url> ↔ прочее; None — неизвестно
+            "input_connected": self.input_connected() if running else None,
         }
 
     # ------------------------------------------------------------- threads
@@ -1843,6 +1961,10 @@ def api_health():
             "uptime": status["uptime"],
             "restarts": status["restarts"],
             "last_exit": status["last_exit"],
+            # три состояния карточки дашборда: вход+выход (зелёная),
+            # нет выхода (жёлтая), нет входа (красная); None — неизвестно
+            "icecast_connected": status.get("icecast_connected"),
+            "input_connected": status.get("input_connected"),
         })
     return jsonify({"ok": True, "counts": counts, "stations": stations})
 

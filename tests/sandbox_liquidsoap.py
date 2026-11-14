@@ -16,6 +16,7 @@ Liquidsoap (доступ к хосту — через host.docker.internal), п�
 (собирается: docker build -t audio-worker:2.4.2 worker).
 """
 
+import socket
 import subprocess
 import sys
 import tempfile
@@ -99,7 +100,13 @@ class LiquidsoapSandboxTest(unittest.TestCase):
         # пользователя): панель обязана переписать их на host.docker.internal
         # при генерации скрипта воркера (containerize_loopback), иначе из
         # контейнера loopback указывал бы на сам контейнер и поток не пошёл.
-        created = self.client.post("/api/streams", json={"name": "Радио Liq"}).get_json()["station"]
+        # id задан явно и уникален: автогенерация дала бы «station-2» — имя
+        # контейнера audio-worker-station-2 совпало бы с демо-воркером
+        # пользователя, и песочница с демо-панелью (автоперезапуск)
+        # перехватывали бы контейнер друг у друга.
+        created = self.client.post("/api/streams", json={
+            "id": "sandbox-liq-2", "name": "Радио Liq",
+        }).get_json()["station"]
         self.station2_id = created["id"]
         self.client.put("/api/streams/" + self.station2_id, json={
             "engine": "liquidsoap",
@@ -407,6 +414,39 @@ class LiquidsoapSandboxTest(unittest.TestCase):
         before = len(bytes(self.icecast.bodies.get("/station-2", b"")))
         body = self.wait_for_body("/station-2", before + 20000)
         self.assertTrue(body.startswith(b"\xff\xf1") or body.startswith(b"\xff\xf9"))
+
+    def _wait_icecast_connected(self, expected, timeout=20):
+        deadline = time.time() + timeout
+        st = {}
+        while time.time() < deadline:
+            st = self.client.get("/api/streams/" + self.station2_id + "/status").get_json()
+            if st.get("icecast_connected") is expected:
+                return st
+            time.sleep(0.3)
+        self.fail("icecast_connected не стал {} за {} с; последний статус: {}".format(
+            expected, timeout, st))
+
+    def test_icecast_connected_status_flag(self):
+        res = self.client.post("/api/streams/" + self.station2_id + "/start").get_json()
+        self.assertTrue(res["ok"], res)
+        self.wait_for_body("/station-2", 20000)
+
+        # Подключение к Icecast установлено — живой флаг true.
+        self._wait_icecast_connected(True)
+
+        # Выход на мёртвый порт: после перезапуска подключиться нельзя —
+        # on_connect не срабатывает, флаг остаётся false.
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        dead_port = probe.getsockname()[1]
+        probe.close()
+        res = self.client.put("/api/streams/" + self.station2_id,
+                              json={"icecast": {"port": dead_port}})
+        self.assertTrue(res.get_json()["ok"], res.get_json())
+        res = self.client.post("/api/streams/" + self.station2_id + "/restart").get_json()
+        self.assertTrue(res["ok"], res)
+        time.sleep(4)  # воркер поднялся, попытка подключения уже была
+        self._wait_icecast_connected(False)
 
 
 if __name__ == "__main__":

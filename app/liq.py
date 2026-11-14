@@ -445,6 +445,14 @@ def generate_liq_script(cfg):
         parts.append("")
 
     parts += [
+        # Флаг «подключён ли выход к Icecast»: колбэки output.icecast
+        # выставляют его при каждом подключении/обрыве, панель читает
+        # живьём по telnet «var.get panel_ice_connected».
+        "# Флаг подключения выхода: читается панелью по telnet "
+        "«var.get panel_ice_connected», колбэки выхода пишут в его ref",
+        'ice_connected = interactive.bool("panel_ice_connected", false)',
+        'ice_connected_ref = interactive.bool.ref("panel_ice_connected")',
+        "",
         "output.icecast(",
         '  id="icecast",',
         '  host="{host}",'.format(host=_liq_string(ice.get("host", "127.0.0.1"))),
@@ -455,6 +463,8 @@ def generate_liq_script(cfg):
         '  name="{name}",'.format(name=_liq_string(name)),
         '  description="AudioPanel worker {sid}",'.format(sid=_liq_string(station_id)),
         "  fallible=true,",
+        "  on_connect={ice_connected_ref := true},",
+        "  on_disconnect={ice_connected_ref := false},",
         "  %fdkaac(channels={ch}, samplerate={sr}, bitrate={br}, afterburner=true),".format(
             ch=int(enc.get("channels", 2)), sr=int(enc.get("sample_rate", 44100)),
             br=int(enc.get("bitrate", 128)),

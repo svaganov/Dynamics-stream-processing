@@ -325,6 +325,59 @@ class PanelApiTest(unittest.TestCase):
         station = self.client.get("/api/streams/" + station_id).get_json()["station"]
         self.assertFalse(station["bypass"])
 
+    def test_icecast_connected_reads_telnet_flag(self):
+        # true/false — состояние флага; «variable not found» (старый
+        # скрипт) и недоступный telnet — None (статус неизвестен).
+        # Опрос идёт по постоянной telnet-сессии (_ice_telnet), чтобы не
+        # спамить лог воркера парами «New client / disconnected».
+        station_id, manager = self._make_running_liquidsoap_station()
+
+        with mock.patch.object(manager, "_ice_telnet", return_value="true\nEND") as tel:
+            self.assertIs(manager.icecast_connected(), True)
+        tel.assert_called_once_with("var.get panel_ice_connected")
+
+        with mock.patch.object(manager, "_ice_telnet", return_value="false\nEND"):
+            self.assertIs(manager.icecast_connected(), False)
+
+        with mock.patch.object(manager, "_ice_telnet",
+                               return_value="Syntax error or variable not found.\nEND"):
+            self.assertIsNone(manager.icecast_connected())
+
+        with mock.patch.object(manager, "_ice_telnet", side_effect=OSError("refused")):
+            self.assertIsNone(manager.icecast_connected())
+
+        # воркер не запущен — None, telnet не дёргается
+        manager.container = None
+        with mock.patch.object(manager, "_ice_telnet") as tel:
+            self.assertIsNone(manager.icecast_connected())
+            tel.assert_not_called()
+
+    def test_input_connected_reads_input_status(self):
+        # «connected <url>» — вход на связи; прочее состояние — входа нет;
+        # unknown command/обрыв telnet — None (неизвестно)
+        station_id, manager = self._make_running_liquidsoap_station()
+
+        with mock.patch.object(manager, "_ice_telnet",
+                               return_value="connected http://host:8000/live\nEND") as tel:
+            self.assertIs(manager.input_connected(), True)
+        tel.assert_called_once_with("input.status")
+
+        with mock.patch.object(manager, "_ice_telnet",
+                               return_value="connecting http://host:8000/live\nEND"):
+            self.assertIs(manager.input_connected(), False)
+
+        with mock.patch.object(manager, "_ice_telnet",
+                               return_value="ERROR: unknown command\nEND"):
+            self.assertIsNone(manager.input_connected())
+
+        with mock.patch.object(manager, "_ice_telnet", side_effect=OSError("closed")):
+            self.assertIsNone(manager.input_connected())
+
+        manager.container = None
+        with mock.patch.object(manager, "_ice_telnet") as tel:
+            self.assertIsNone(manager.input_connected())
+            tel.assert_not_called()
+
     def test_adjust_requires_any_parameter(self):
         res = self.client.post("/api/streams/station-1/adjust", json={})
         self.assertEqual(res.status_code, 400)

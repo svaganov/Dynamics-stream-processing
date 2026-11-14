@@ -45,6 +45,7 @@ function showStation(stationId, tab) {
   if (stationId && stationId !== currentStationId) selectStation(stationId);
   updateStationHeader();
   activateTab(TABS.includes(tab) ? tab : "processing");
+  updateListenUI(); // подсветка кнопок прослушки — только для звучащей станции
 }
 
 function applyRoute() {
@@ -435,6 +436,62 @@ function updateStationHeader() {
   $("stId").textContent = station ? "· " + station.id : "";
 }
 
+/* ---------- переименование потока (инлайн-поле в шапке) ---------- */
+
+$("stName").addEventListener("click", () => {
+  const station = selectedStation();
+  if (!station || $("stNameEdit")) return;
+  const span = $("stName");
+  const input = document.createElement("input");
+  input.id = "stNameEdit";
+  input.value = station.name;
+  input.maxLength = 80;
+  input.spellcheck = false;
+  span.replaceWith(input);
+  input.focus();
+  input.select();
+
+  let done = false;
+  const finish = async (save) => {
+    if (done) return;
+    done = true;
+    const name = input.value.trim();
+    input.replaceWith(span);
+    if (!save || !name || name === station.name) {
+      if (save && !name) toast("Имя не может быть пустым", true);
+      updateStationHeader();
+      return;
+    }
+    try {
+      const res = await fetch("/api/streams/" + encodeURIComponent(station.id), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        toast(data.error || "Не удалось переименовать", true);
+        updateStationHeader();
+        return;
+      }
+      stationMap.set(data.station.id, data.station);
+      const idx = streamsDoc.streams.findIndex((s) => s.id === data.station.id);
+      if (idx >= 0) streamsDoc.streams[idx] = data.station; // карточка дашборда читает streamsDoc
+      drafts.delete(data.station.id);
+      renderStationSelect();
+      toast("Поток переименован");
+    } catch (e) {
+      toast("Не удалось переименовать", true);
+      updateStationHeader();
+    }
+  };
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); finish(true); }
+    else if (e.key === "Escape") { e.preventDefault(); finish(false); }
+  });
+  input.addEventListener("blur", () => finish(true));
+});
+
 /* ---------- dashboard: карточки потоков ---------- */
 
 function outputUrlOf(st) {
@@ -478,6 +535,24 @@ function scardBtn(cls, label, act, id) {
   b.addEventListener("click", (e) => {
     e.stopPropagation(); // кнопка не должна проваливать в страницу станции
     dashAction(act, id);
+  });
+  return b;
+}
+
+/* Прослушка прямо с карточки дашборда: A — вход (исходный), B — выход
+   (после обработки). Канал один на всю панель, как и на странице станции. */
+function scardListenBtn(id, which) {
+  const b = document.createElement("button");
+  b.className = "btn scard-listen";
+  b.dataset.station = id;
+  b.dataset.which = which;
+  b.textContent = which === "input" ? "🎧 A · вход" : "🎧 B · выход";
+  b.title = which === "input"
+    ? "Прослушка входа (исходный поток)"
+    : "Прослушка выхода (после обработки)";
+  b.addEventListener("click", (e) => {
+    e.stopPropagation(); // кнопка не должна проваливать в страницу станции
+    toggleCardListen(id, which);
   });
   return b;
 }
@@ -573,7 +648,13 @@ function renderDashboard() {
     actions.appendChild(scardBtn("btn", "⟳ Перезапуск", "restart", st.id));
     actions.appendChild(scardBtn("btn danger", "■ Стоп", "stop", st.id));
 
-    card.append(head, urls, chain, meta, actions);
+    // прослушка A/B — отдельная нижняя строка карточки
+    const listenRow = document.createElement("div");
+    listenRow.className = "scard-listen-row";
+    listenRow.appendChild(scardListenBtn(st.id, "input"));
+    listenRow.appendChild(scardListenBtn(st.id, "output"));
+
+    card.append(head, urls, chain, meta, actions, listenRow);
     card.addEventListener("click", () => {
       location.hash = "#/s/" + encodeURIComponent(st.id) + "/processing";
     });
@@ -583,6 +664,7 @@ function renderDashboard() {
     grid.appendChild(card);
   }
   updateDashboardCards();
+  updateListenUI(); // восстановить подсветку звучащей карточки после пересоздания DOM
 }
 
 /* Живое обновление карточек без пересоздания DOM (иначе поллинг каждые
@@ -600,9 +682,27 @@ function updateDashboardCards() {
   for (const card of cards) {
     const health = healthById.get(card.dataset.id) || {};
     const running = Boolean(health.running);
-    card.classList.toggle("running", running);
-    card.querySelector(".scard-status").classList.toggle("running", running);
-    card.querySelector(".m-status").textContent = running ? "работает" : "остановлено";
+    /* Три состояния работающей карточки:
+       красная — входной поток оборвался; жёлтая — вход есть, но выход
+       не подключён к Icecast; зелёная — есть и вход, и выход.
+       null (неизвестно, старый скрипт воркера) не считаем аварией. */
+    let state = "";
+    if (running) {
+      if (health.input_connected === false) state = "no-input";
+      else if (health.icecast_connected === false) state = "no-output";
+      else state = "running";
+    }
+    card.classList.toggle("running", state === "running");
+    card.classList.toggle("no-output", state === "no-output");
+    card.classList.toggle("no-input", state === "no-input");
+    card.querySelector(".scard-status").classList.toggle("running", state === "running");
+    card.querySelector(".scard-status").classList.toggle("no-output", state === "no-output");
+    card.querySelector(".scard-status").classList.toggle("no-input", state === "no-input");
+    const statusText = !running ? "остановлено"
+      : state === "no-input" ? "нет входа"
+      : state === "no-output" ? "нет выхода"
+      : "работает";
+    card.querySelector(".m-status").textContent = statusText;
     card.querySelector(".m-uptime").textContent =
       running ? "аптайм " + fmtUptime(health.uptime || 0) : "";
     card.querySelector(".m-restarts").textContent = "рестартов " + (health.restarts || 0);
@@ -746,6 +846,8 @@ async function saveSelected() {
       return false;
     }
     stationMap.set(data.station.id, data.station);
+    const idx = streamsDoc.streams.findIndex((s) => s.id === data.station.id);
+    if (idx >= 0) streamsDoc.streams[idx] = data.station; // карточки дашборда читают streamsDoc
     drafts.delete(data.station.id);
     renderStationSelect();
     return true;
@@ -800,14 +902,20 @@ $("btnClearLog").addEventListener("click", () => {
 const audio = new Audio();
 audio.preload = "none";
 let listening = null; // "input" | "output" | null
+let listenStationId = null; // какая станция звучит (дашборд и страница станции — один канал)
 // Поколение прослушки: переключение/остановка инкрементируют его, чтобы
 // асинхронные события старого потока (error/ended) не давали ложных тостов.
 let listenGeneration = 0;
 const LISTEN_HINT = "Мониторинг идёт отдельным MP3-каналом (задержка 1–3 с) — только для сравнения звука на слух";
 
 function updateListenUI() {
-  $("btnListenInput").classList.toggle("playing", listening === "input");
-  $("btnListenOutput").classList.toggle("playing", listening === "output");
+  const own = listenStationId === currentStationId; // звучит ли выбранная станция
+  $("btnListenInput").classList.toggle("playing", Boolean(listening) && own && listening === "input");
+  $("btnListenOutput").classList.toggle("playing", Boolean(listening) && own && listening === "output");
+  document.querySelectorAll(".scard-listen").forEach((b) => {
+    b.classList.toggle("playing",
+      Boolean(listening) && listenStationId === b.dataset.station && listening === b.dataset.which);
+  });
   $("listenStatus").textContent = listening
     ? "Играет: " + (listening === "input" ? "входной поток (исходный)" : "выходной поток (после обработки)")
     : LISTEN_HINT;
@@ -850,6 +958,7 @@ function startListenWatchdog() {
 
 function stopListen() {
   listening = null;
+  listenStationId = null;
   listenGeneration++;
   stopListenWatchdog();
   audio.pause();
@@ -859,13 +968,14 @@ function stopListen() {
 }
 
 async function toggleListen(which) {
-  if (listening === which) { stopListen(); return; }
+  if (listening === which && listenStationId === currentStationId) { stopListen(); return; }
   const gen = ++listenGeneration;
   audio.pause();
   audio.volume = $("listen_vol").value / 100;
   audio.src = "/api/streams/" + encodeURIComponent(currentStationId) +
     "/listen/" + which + "?t=" + Date.now();
   listening = which;
+  listenStationId = currentStationId;
   updateListenUI();
   startListenWatchdog();
   // play() вызываем синхронно, в том же жесте клика: после любого await
@@ -884,6 +994,31 @@ async function toggleListen(which) {
       ? "Браузер заблокировал воспроизведение"
       : "Настройки не сохранены — воспроизведение отменено") +
       " [" + (e && e.name) + ": " + (e && e.message) + "]", true);
+    stopListen();
+  }
+}
+
+/* Прослушка с карточки дашборда: тот же канал, что и на странице станции,
+   но без привязки к выбранной станции и без сохранения формы. */
+async function toggleCardListen(stationId, which) {
+  if (listening === which && listenStationId === stationId) { stopListen(); return; }
+  const gen = ++listenGeneration;
+  audio.pause();
+  audio.volume = $("listen_vol").value / 100;
+  audio.src = "/api/streams/" + encodeURIComponent(stationId) +
+    "/listen/" + which + "?t=" + Date.now();
+  listening = which;
+  listenStationId = stationId;
+  updateListenUI();
+  startListenWatchdog();
+  try {
+    // play() — синхронно в жесте клика, до любого await (см. toggleListen)
+    await audio.play();
+  } catch (e) {
+    if (e && e.name === "AbortError") return; // своё же переключение A↔B
+    if (gen !== listenGeneration) return;
+    toast("Браузер заблокировал воспроизведение [" +
+      (e && e.name) + ": " + (e && e.message) + "]", true);
     stopListen();
   }
 }
@@ -930,6 +1065,26 @@ function updateSelectedStatus(status) {
   $("btnStart").disabled = !station || running;
   $("btnStop").disabled = !station || !running;
   syncGainLive();
+  syncIcecastStatus(status);
+}
+
+/* Статус подключения выхода к Icecast (карточка 07): живой флаг
+   on_connect/on_disconnect воркера, опрашивается со статусом станции. */
+function syncIcecastStatus(status) {
+  const box = $("iceStatus");
+  const text = $("iceStatusText");
+  box.classList.remove("ok", "bad");
+  if (!status || !status.running) {
+    text.textContent = "Подключение к Icecast: воркер остановлен";
+  } else if (status.icecast_connected === true) {
+    box.classList.add("ok");
+    text.textContent = "Подключено к Icecast";
+  } else if (status.icecast_connected === false) {
+    box.classList.add("bad");
+    text.textContent = "Нет подключения к Icecast — воркер повторяет попытки";
+  } else {
+    text.textContent = "Статус подключения неизвестен — перезапустите воркер";
+  }
 }
 
 /* Живая подстройка (telnet воркера) доступна только для работающей

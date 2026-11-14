@@ -68,6 +68,29 @@
 
   header .spacer { flex: 1; }
 
+  /* ---------- панель станции: вкладки разделов + BYPASS (под хэдером) ----------
+     Выравнивание по левому краю сетки секций (как .layout), вид — кнопки. */
+  .station-toolbar {
+    display: flex; align-items: center; gap: 10px;
+    max-width: 1560px; margin: 0 auto;
+    padding: 12px 16px 0;
+  }
+  .station-toolbar .nav-tabs { align-self: center; gap: 8px; }
+  .station-toolbar .nav-tab {
+    font-size: 11px; letter-spacing: 0.12em;
+    padding: 7px 14px;
+    color: var(--text-dim);
+    background: var(--panel);
+    border: 1px solid var(--border); border-radius: 8px;
+  }
+  .station-toolbar .nav-tab:hover { color: var(--text); border-color: rgba(67, 198, 221, 0.5); }
+  .station-toolbar .nav-tab.active {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: rgba(67, 198, 221, 0.10);
+  }
+  .station-toolbar .bypass-toggle { margin-left: auto; }
+
   /* ---------- bypass ---------- */
   .bypass-toggle {
     display: inline-flex; align-items: center; gap: 8px;
@@ -255,6 +278,18 @@
   }
   .field label .val { color: var(--accent); font-weight: 500; letter-spacing: 0.02em; text-transform: none; }
   .field .hint { font-size: 11px; color: var(--text-dim); margin-top: 4px; }
+  /* статус подключения выхода к Icecast (карточка 07) */
+  .ice-status {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 11.5px; color: var(--text-dim);
+    padding: 7px 10px; margin-top: 8px;
+    border: 1px solid var(--border); border-radius: 6px; background: var(--panel-2);
+  }
+  .ice-status .dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); }
+  .ice-status.ok { color: var(--green); border-color: rgba(61, 220, 132, 0.45); }
+  .ice-status.ok .dot { background: var(--green); animation: pulse 1.5s ease-in-out infinite; }
+  .ice-status.bad { color: var(--red); border-color: rgba(255, 82, 82, 0.45); }
+  .ice-status.bad .dot { background: var(--red); }
 
   input[type="text"], input[type="password"], input[type="number"], select {
     width: 100%;
@@ -435,9 +470,25 @@
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 300px;
   }
   .st-name .id { color: var(--text-dim); font-weight: 400; font-size: 11px; }
+  /* имя потока редактируется по клику: пунктир-подсказка + инлайн-поле */
+  #stName.editable { cursor: text; border-bottom: 1px dashed transparent; }
+  #stName.editable:hover { border-bottom-color: var(--text-dim); }
+  #stNameEdit {
+    font: inherit; color: var(--text);
+    background: var(--panel-2); border: 1px solid var(--accent); border-radius: 5px;
+    padding: 1px 6px; width: 16ch; max-width: 280px; outline: none;
+  }
 
   .dash-summary { color: var(--text-dim); font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; }
   .dash-summary b { color: var(--green); }
+  /* легенда состояний карточек в хэдере дашборда */
+  .dash-legend { display: flex; align-items: center; gap: 12px; font-size: 10.5px; color: var(--text-dim); white-space: nowrap; }
+  .dash-legend .lg { display: inline-flex; align-items: center; gap: 5px; }
+  .dash-legend .d { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .dash-legend .d.g { background: var(--green); }
+  .dash-legend .d.y { background: var(--yellow); }
+  .dash-legend .d.r { background: var(--red); }
+  .dash-legend .d.off { background: var(--text-dim); }
 
   /* ---------- dashboard grid ---------- */
   #viewDashboard { max-width: 1560px; margin: 0 auto; padding: 16px; }
@@ -461,6 +512,22 @@
     box-shadow: 0 0 0 1px rgba(61, 220, 132, 0.45), 0 0 20px rgba(61, 220, 132, 0.18);
   }
   .scard.running:hover { border-color: var(--green); }
+  /* вход есть, выходное подключение потеряно — жёлтая карточка */
+  .scard.no-output {
+    background: linear-gradient(180deg, rgba(255, 213, 74, 0.14), rgba(255, 213, 74, 0.06)), var(--panel);
+    border-color: var(--yellow);
+    box-shadow: 0 0 0 1px rgba(255, 213, 74, 0.40), 0 0 20px rgba(255, 213, 74, 0.15);
+  }
+  .scard.no-output:hover { border-color: var(--yellow); }
+  /* входной поток оборвался — красная карточка */
+  .scard.no-input {
+    background: linear-gradient(180deg, rgba(255, 82, 82, 0.14), rgba(255, 82, 82, 0.06)), var(--panel);
+    border-color: var(--red);
+    box-shadow: 0 0 0 1px rgba(255, 82, 82, 0.40), 0 0 20px rgba(255, 82, 82, 0.15);
+  }
+  .scard.no-input:hover { border-color: var(--red); }
+  .scard-status.no-output { background: var(--yellow); animation: pulse 1.5s ease-in-out infinite; }
+  .scard-status.no-input { background: var(--red); animation: pulse 1.5s ease-in-out infinite; }
   .scard-head { display: flex; align-items: center; gap: 10px; min-width: 0; }
   .scard-status { flex: none; width: 9px; height: 9px; border-radius: 50%; background: var(--text-dim); }
   .scard-status.running { background: var(--green); animation: pulse 1.5s ease-in-out infinite; }
@@ -481,6 +548,17 @@
   .scard-meta .bypass { color: var(--yellow); }
   .scard-actions { display: flex; gap: 8px; margin-top: 2px; }
   .scard-actions .btn { padding: 5px 11px; font-size: 11px; margin: 0; }
+  /* прослушка A/B — отдельная нижняя строка карточки */
+  .scard-listen-row {
+    display: flex; gap: 8px;
+    margin-top: 4px; padding-top: 10px;
+    border-top: 1px solid rgba(31, 42, 56, 0.6);
+  }
+  .scard-listen { flex: 1; padding: 6px 8px !important; font-size: 11px; margin: 0; }
+  .scard-listen.playing {
+    color: var(--green); border-color: var(--green);
+    background: rgba(61, 220, 132, 0.12);
+  }
   .dash-empty { color: var(--text-dim); padding: 48px 0; text-align: center; grid-column: 1 / -1; }
 
   @media (prefers-reduced-motion: reduce) {
@@ -503,15 +581,15 @@
   </div>
 
   <button class="btn only-station" id="btnBack" title="К списку потоков">← Потоки</button>
-  <span class="st-name only-station"><span id="stName">—</span> <span class="id" id="stId"></span></span>
-
-  <nav class="nav-tabs only-station" role="tablist" aria-label="Разделы панели">
-    <button class="nav-tab active" role="tab" aria-selected="true" data-tab="processing">Обработка</button>
-    <button class="nav-tab" role="tab" aria-selected="false" data-tab="output">Вывод и контроль</button>
-    <button class="nav-tab" role="tab" aria-selected="false" data-tab="system">Команда и лог</button>
-  </nav>
+  <span class="st-name only-station"><span id="stName" class="editable" title="Клик — переименовать поток">—</span> <span class="id" id="stId"></span></span>
 
   <span class="dash-summary only-dashboard" id="dashSummary">0 работает · 0 остановлено</span>
+  <span class="dash-legend only-dashboard" title="Состояния карточек потоков">
+    <span class="lg"><i class="d g"></i>вход + выход</span>
+    <span class="lg"><i class="d y"></i>нет выхода</span>
+    <span class="lg"><i class="d r"></i>нет входа</span>
+    <span class="lg"><i class="d off"></i>остановлен</span>
+  </span>
 
   <div class="station-picker" aria-label="Станции">
     <select id="stationSelect" aria-label="Выбранная станция" hidden></select>
@@ -521,15 +599,23 @@
 
   <div class="spacer"></div>
 
-  <label class="bypass-toggle only-station" id="bypassToggle" title="Обход всей обработки: поток идёт без EQ, усиления, компрессора, нормализации и лимитера. Для работающего Liquidsoap-воркера переключается живьём — без перезапуска">
-    <span class="switch"><input type="checkbox" id="bypass"><span class="track"></span></span>
-    BYPASS
-  </label>
-
   <button class="btn primary only-station" id="btnStart">▶ Старт</button>
   <button class="btn only-station" id="btnRestart">⟳ Перезапуск</button>
   <button class="btn danger only-station" id="btnStop">■ Стоп</button>
 </header>
+
+<!-- ============ ПАНЕЛЬ СТАНЦИИ: вкладки разделов + BYPASS ============ -->
+<div class="station-toolbar only-station">
+  <nav class="nav-tabs" role="tablist" aria-label="Разделы панели">
+    <button class="nav-tab active" role="tab" aria-selected="true" data-tab="processing">Обработка</button>
+    <button class="nav-tab" role="tab" aria-selected="false" data-tab="output">Вывод и контроль</button>
+    <button class="nav-tab" role="tab" aria-selected="false" data-tab="system">Команда и лог</button>
+  </nav>
+  <label class="bypass-toggle" id="bypassToggle" title="Обход всей обработки: поток идёт без EQ, усиления, компрессора, нормализации и лимитера. Для работающего Liquidsoap-воркера переключается живьём — без перезапуска">
+    <span class="switch"><input type="checkbox" id="bypass"><span class="track"></span></span>
+    BYPASS
+  </label>
+</div>
 
 <!-- ======================== VIEW: ДАШБОРД ПОТОКОВ ======================== -->
 <div id="viewDashboard" class="only-dashboard">
@@ -739,6 +825,9 @@
               <label>Пароль</label>
               <input type="password" id="ice_password" autocomplete="off">
             </div>
+          </div>
+          <div class="ice-status" id="iceStatus">
+            <span class="dot"></span><span id="iceStatusText">—</span>
           </div>
           <div class="hint">Изменения применяются при перезапуске станции. Для движка Liquidsoap адреса 127.0.0.1/localhost автоматически подставляются в воркер как host.docker.internal — сервер на этой же машине остаётся достижимым из контейнера</div>
         </div>

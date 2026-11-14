@@ -202,6 +202,15 @@ class LiqGeneratorTest(unittest.TestCase):
         self.assertNotIn("switch(", script)
         self.assertIn("output.icecast", script)
 
+    def test_icecast_connected_flag_in_output(self):
+        # флаг подключения выхода: интерактивная bool + колбэки on_connect/
+        # on_disconnect пишут в её ref — панель читает «var.get panel_ice_connected»
+        script = liq.generate_liq_script(make_cfg())
+        self.assertIn('interactive.bool("panel_ice_connected", false)', script)
+        self.assertIn('interactive.bool.ref("panel_ice_connected")', script)
+        self.assertIn("on_connect={ice_connected_ref := true}", script)
+        self.assertIn("on_disconnect={ice_connected_ref := false}", script)
+
     def test_all_disabled_equals_no_filter_block(self):
         cfg = make_cfg(equalizer={"enabled": False, "gains": [0] * 10},
                        gain={"enabled": False, "db": 0},
