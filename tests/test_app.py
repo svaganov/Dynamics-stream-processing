@@ -581,6 +581,42 @@ class PanelApiTest(unittest.TestCase):
         self.assertEqual(out["source"]["url"],
                          "http://user:pw@host.docker.internal:9000/a")
 
+    def test_containerize_loopback_rewrites_fallback_url(self):
+        cfg = {"source": {"url": "http://127.0.0.1:8000/live"},
+               "icecast": {"host": "127.0.0.1"},
+               "fallback": {"enabled": True, "mode": "url",
+                            "url": "http://127.0.0.1:8800/backup.aacp"}}
+        out = panel.containerize_loopback(cfg)
+        self.assertEqual(out["fallback"]["url"],
+                         "http://host.docker.internal:8800/backup.aacp")
+        # внешний адрес заглушки не трогаем
+        cfg["fallback"]["url"] = "https://cdn.example.com/backup.mp3"
+        out = panel.containerize_loopback(cfg)
+        self.assertEqual(out["fallback"]["url"], "https://cdn.example.com/backup.mp3")
+
+    def test_fallback_normalization(self):
+        # неизвестный режим → silence; url-режим без адреса → silence
+        st = self.client.put("/api/streams/station-1", json={
+            "fallback": {"enabled": True, "mode": "loud_alarm", "url": ""},
+        }).get_json()["station"]
+        self.assertEqual(st["fallback"]["mode"], "silence")
+        st = self.client.put("/api/streams/station-1", json={
+            "fallback": {"enabled": True, "mode": "url", "url": "  "},
+        }).get_json()["station"]
+        self.assertEqual(st["fallback"]["mode"], "silence")
+        # корректный url-режим сохраняется
+        st = self.client.put("/api/streams/station-1", json={
+            "fallback": {"enabled": True, "mode": "url",
+                         "url": "http://backup:8000/live"},
+        }).get_json()["station"]
+        self.assertEqual(st["fallback"],
+                         {"enabled": True, "mode": "url", "url": "http://backup:8000/live"})
+        # по умолчанию резерв выключен
+        fresh = self.client.post("/api/streams", json={"name": "Fresh"}).get_json()["station"]
+        st = self.client.get("/api/streams/" + fresh["id"]).get_json()["station"]
+        self.assertEqual(st["fallback"]["enabled"], False)
+        self.assertEqual(st["fallback"]["mode"], "silence")
+
     def test_command_preview_shows_containerized_loopback(self):
         # предпросмотр скрипта совпадает с реальным: loopback переписан
         res = self.client.post("/api/streams", json={"name": "Liq"}).get_json()["station"]

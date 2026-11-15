@@ -444,6 +444,27 @@ def generate_liq_script(cfg):
         parts.append(block)
         parts.append("")
 
+    fb = cfg.get("fallback") or {}
+    if fb.get("enabled"):
+        mode = str(fb.get("mode") or "silence")
+        if mode == "tone":
+            stub = ("# резерв: тихий тон 880 Гц ≈ −26 дБ — «техническая пауза»\n"
+                    "stub = amplify(0.05, sine(880.))")
+        elif mode == "url" and str(fb.get("url") or "").strip():
+            stub = ("# резерв: запасной поток/файл (бесконечный источник)\n"
+                    'stub = buffer(single("{url}"))'.format(
+                        url=_liq_string(str(fb["url"]).strip())))
+        else:
+            stub = ("# резерв: тишина — эфир и слушатели не отваливаются\n"
+                    "stub = blank()")
+        parts += [
+            "# --- резерв при обрыве входа: fallback переключает на заглушку, "
+            "при возврате источника — обратно автоматически ---",
+            stub,
+            "s = fallback(track_sensitive=false, [s, stub])",
+            "",
+        ]
+
     parts += [
         # Флаг «подключён ли выход к Icecast»: колбэки output.icecast
         # выставляют его при каждом подключении/обрыве, панель читает

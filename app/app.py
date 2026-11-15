@@ -74,6 +74,11 @@ DEFAULT_STREAM_CONFIG = {
         "reconnect": True,
         "reconnect_delay_max": 5,
     },
+    "fallback": {
+        "enabled": False,   # резерв при обрыве входа: эфир не падает
+        "mode": "silence",  # silence (тишина) | tone (тихий тон) | url (резервный поток/файл)
+        "url": "",          # для mode=url: резервный поток или файл (http/путь в контейнере)
+    },
     "equalizer": {
         "enabled": False,
         # усиление полос в dB, частоты — EQ_FREQS ниже
@@ -209,6 +214,20 @@ def _normalize_station(raw, fallback_id=None, fallback_name=None):
     gains = [float(g) for g in gains[:len(EQ_FREQS)]]
     gains += [0.0] * (len(EQ_FREQS) - len(gains))
     station["equalizer"]["gains"] = [max(-12.0, min(12.0, g)) for g in gains]
+
+    fb = station.get("fallback") if isinstance(station.get("fallback"), dict) else {}
+    mode = str(fb.get("mode") or "silence").strip().lower()
+    if mode not in ("silence", "tone", "url"):
+        mode = "silence"
+    url = str(fb.get("url") or "").strip()
+    station["fallback"] = {
+        "enabled": bool(fb.get("enabled", False)),
+        "mode": mode,
+        "url": url,
+    }
+    if station["fallback"]["enabled"] and mode == "url" and not url:
+        # резервный поток без адреса — режим бессмысленен: тишина
+        station["fallback"]["mode"] = "silence"
     return station
 
 
@@ -943,22 +962,30 @@ def containerize_loopback(cfg):
     if isinstance(ice, dict) and str(ice.get("host", "")).lower() in LOOPBACK_HOSTS:
         ice["host"] = "host.docker.internal"
     source = cfg.get("source")
-    url = (source or {}).get("url", "")
-    if url:
-        parts = urllib.parse.urlsplit(url)
-        if (parts.hostname or "").lower() in LOOPBACK_HOSTS:
-            userinfo = ""
-            if parts.username:
-                userinfo = parts.username
-                if parts.password:
-                    userinfo += ":" + parts.password
-                userinfo += "@"
-            netloc = userinfo + "host.docker.internal"
-            if parts.port:
-                netloc += ":{}".format(parts.port)
-            source["url"] = urllib.parse.urlunsplit(
-                (parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+    if source and source.get("url"):
+        source["url"] = _loopback_url_to_host_gateway(source["url"])
+    fb = cfg.get("fallback")
+    if isinstance(fb, dict) and fb.get("url"):
+        fb["url"] = _loopback_url_to_host_gateway(fb["url"])
     return cfg
+
+
+def _loopback_url_to_host_gateway(url):
+    """loopback-хост в URL → host.docker.internal (userinfo/порт сохраняются)."""
+    parts = urllib.parse.urlsplit(url)
+    if (parts.hostname or "").lower() not in LOOPBACK_HOSTS:
+        return url
+    userinfo = ""
+    if parts.username:
+        userinfo = parts.username
+        if parts.password:
+            userinfo += ":" + parts.password
+        userinfo += "@"
+    netloc = userinfo + "host.docker.internal"
+    if parts.port:
+        netloc += ":{}".format(parts.port)
+    return urllib.parse.urlunsplit(
+        (parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
 class DockerWorkerManager:

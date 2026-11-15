@@ -448,6 +448,54 @@ class LiquidsoapSandboxTest(unittest.TestCase):
         time.sleep(4)  # воркер поднялся, попытка подключения уже была
         self._wait_icecast_connected(False)
 
+    def _wait_input_connected(self, expected, timeout=20):
+        deadline = time.time() + timeout
+        st = {}
+        while time.time() < deadline:
+            st = self.client.get("/api/streams/" + self.station2_id + "/status").get_json()
+            if st.get("input_connected") is expected:
+                return st
+            time.sleep(0.3)
+        self.fail("input_connected не стал {} за {} с; последний статус: {}".format(
+            expected, timeout, st))
+
+    def test_fallback_keeps_output_alive_on_source_loss(self):
+        # Резерв включён, вход указывает на мёртвый порт: эфир обязан жить
+        # за счёт заглушки, а после возврата адреса живого источника —
+        # снова нести реальный звук.
+        self.client.put("/api/streams/" + self.station2_id, json={
+            "fallback": {"enabled": True, "mode": "silence", "url": ""},
+        })
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        dead_port = probe.getsockname()[1]
+        probe.close()
+        res = self.client.put("/api/streams/" + self.station2_id, json={
+            "source": {"url": "http://127.0.0.1:{}/dead.mp3".format(dead_port)},
+        })
+        self.assertTrue(res.get_json()["ok"], res.get_json())
+
+        res = self.client.post("/api/streams/" + self.station2_id + "/start").get_json()
+        self.assertTrue(res["ok"], res)
+        # Выход растёт от заглушки и это валидный AAC/ADTS-поток.
+        body = self.wait_for_body("/station-2", 20000, timeout=60)
+        self.assertTrue(body.startswith(b"\xff\xf1") or body.startswith(b"\xff\xf9"))
+        self._wait_input_connected(False, timeout=30)
+        before = len(body)
+        self.wait_for_body("/station-2", before + 15000, timeout=60)
+
+        # Возвращаем живой источник: после перезапуска вход подключается,
+        # эфир продолжает расти уже с реальным звуком.
+        res = self.client.put("/api/streams/" + self.station2_id, json={
+            "source": {"url": self.source_url("/source.mp3")},
+        })
+        self.assertTrue(res.get_json()["ok"], res.get_json())
+        res = self.client.post("/api/streams/" + self.station2_id + "/restart").get_json()
+        self.assertTrue(res["ok"], res)
+        self._wait_input_connected(True, timeout=30)
+        before = len(bytes(self.icecast.bodies.get("/station-2", b"")))
+        self.wait_for_body("/station-2", before + 15000, timeout=60)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

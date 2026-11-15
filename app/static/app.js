@@ -222,6 +222,9 @@ const FIELDS = {
   src_url:        ["source", "url"],
   src_reconnect:  ["source", "reconnect", "bool"],
   src_reconnect_delay_max: ["source", "reconnect_delay_max", "num"],
+  fb_enabled:     ["fallback", "enabled", "bool"],
+  fb_mode:        ["fallback", "mode"],
+  fb_url:         ["fallback", "url"],
   eq_enabled:     ["equalizer", "enabled", "bool"],
   gain_enabled:   ["gain", "enabled", "bool"],
   gain_db:        ["gain", "db", "num"],
@@ -328,7 +331,15 @@ function syncCardState() {
   $("cardCompressor").classList.toggle("disabled", bypass || !$("comp_enabled").checked);
   $("cardLoudnorm").classList.toggle("disabled", bypass || !$("ln_enabled").checked);
   $("cardLimiter").classList.toggle("disabled", bypass || !$("lim_enabled").checked);
+  syncFallbackState();
   syncGainLive();
+}
+
+/* Поля резерва: блок активен при включённом fb_enabled; URL — только в режиме url */
+function syncFallbackState() {
+  const on = $("fb_enabled").checked;
+  $("fbFields").classList.toggle("disabled", !on);
+  $("fbUrlField").style.display = $("fb_mode").value === "url" ? "" : "none";
 }
 
 /* ---------- right panel: chain + urls ---------- */
@@ -651,6 +662,10 @@ function renderDashboard() {
     // прослушка A/B — отдельная нижняя строка карточки
     const listenRow = document.createElement("div");
     listenRow.className = "scard-listen-row";
+    const listenLbl = document.createElement("span");
+    listenLbl.className = "lbl";
+    listenLbl.textContent = "Подслушка";
+    listenRow.appendChild(listenLbl);
     listenRow.appendChild(scardListenBtn(st.id, "input"));
     listenRow.appendChild(scardListenBtn(st.id, "output"));
 

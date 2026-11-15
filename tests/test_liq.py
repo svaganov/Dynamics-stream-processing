@@ -211,6 +211,30 @@ class LiqGeneratorTest(unittest.TestCase):
         self.assertIn("on_connect={ice_connected_ref := true}", script)
         self.assertIn("on_disconnect={ice_connected_ref := false}", script)
 
+    def test_fallback_modes(self):
+        # выключен — fallback в скрипте нет совсем
+        script = liq.generate_liq_script(make_cfg())
+        self.assertNotIn("fallback(", script)
+
+        # тишина
+        cfg = make_cfg(fallback={"enabled": True, "mode": "silence", "url": ""})
+        script = liq.generate_liq_script(cfg)
+        self.assertIn("stub = blank()", script)
+        self.assertIn("s = fallback(track_sensitive=false, [s, stub])", script)
+        # fallback — после цепочки, но до выхода на Icecast
+        self.assertLess(script.index("fallback("), script.index("output.icecast("))
+
+        # тон
+        cfg = make_cfg(fallback={"enabled": True, "mode": "tone", "url": ""})
+        script = liq.generate_liq_script(cfg)
+        self.assertIn("stub = amplify(0.05, sine(880.))", script)
+
+        # резервный поток
+        cfg = make_cfg(fallback={"enabled": True, "mode": "url",
+                                 "url": "http://backup:8000/live"})
+        script = liq.generate_liq_script(cfg)
+        self.assertIn('stub = buffer(single("http://backup:8000/live"))', script)
+
     def test_all_disabled_equals_no_filter_block(self):
         cfg = make_cfg(equalizer={"enabled": False, "gains": [0] * 10},
                        gain={"enabled": False, "db": 0},

@@ -162,6 +162,7 @@
   }
   section.card.disabled > .fields { opacity: 0.35; pointer-events: none; }
   .eq-wrap.disabled { opacity: 0.35; pointer-events: none; }
+  #fbFields.disabled { opacity: 0.35; pointer-events: none; }
   @media (min-width: 900px) {
     .card.s4 { grid-column: span 4; }
     .card.s6 { grid-column: span 6; }
@@ -555,6 +556,7 @@
     border-top: 1px solid rgba(31, 42, 56, 0.6);
   }
   .scard-listen { flex: 1; padding: 6px 8px !important; font-size: 11px; margin: 0; }
+  .scard-listen-row .lbl { align-self: center; font-size: 10.5px; color: var(--text-dim); white-space: nowrap; }
   .scard-listen.playing {
     color: var(--green); border-color: var(--green);
     background: rgba(61, 220, 132, 0.12);
@@ -643,6 +645,27 @@
           <div class="field">
             <label>Макс. задержка переподключения, с <span class="val" id="src_reconnect_delay_max_val"></span></label>
             <input type="range" id="src_reconnect_delay_max" min="1" max="30" step="1">
+          </div>
+          <div class="field">
+            <div class="checkline">
+              <span class="grow">Резерв при обрыве входа</span>
+              <span class="switch"><input type="checkbox" id="fb_enabled"><span class="track"></span></span>
+            </div>
+          </div>
+          <div id="fbFields">
+            <div class="field">
+              <label>Заглушка на время обрыва</label>
+              <select id="fb_mode" style="width:100%">
+                <option value="silence">Тишина — эфир и слушатели не отваливаются</option>
+                <option value="tone">Тихий тон 880 Гц («техническая пауза»)</option>
+                <option value="url">Резервный поток (URL)</option>
+              </select>
+            </div>
+            <div class="field" id="fbUrlField">
+              <label>URL резервного потока</label>
+              <input type="text" id="fb_url" placeholder="http://host:8000/backup" spellcheck="false">
+            </div>
+            <div class="hint">При обрыве источника выход переключается на заглушку, при возврате — обратно автоматически. Применяется при перезапуске станции (Liquidsoap)</div>
           </div>
         </div>
       </section>
@@ -765,7 +788,7 @@
     <div class="tab-page" id="tab-output" role="tabpanel">
 
       <section class="card s4">
-        <div class="card-head"><h2><span class="idx">06</span>Кодирование</h2></div>
+        <div class="card-head"><h2><span class="idx">06</span>Настройка Кодирования</h2></div>
         <div class="fields">
           <div class="field">
             <label>Кодек AAC</label>
@@ -800,7 +823,7 @@
       </section>
 
       <section class="card s4">
-        <div class="card-head"><h2><span class="idx">07</span>Icecast</h2></div>
+        <div class="card-head"><h2><span class="idx">07</span>Настройка подключения к Icecast</h2></div>
         <div class="fields">
           <div class="row2">
             <div class="field">
@@ -867,7 +890,7 @@
       </section>
 
       <section class="card s12">
-        <div class="card-head"><h2><span class="idx">09</span>Прослушка A/B</h2></div>
+        <div class="card-head"><h2><span class="idx">09</span>Подслушка A/B</h2></div>
         <div class="fields">
           <div class="listen-row">
             <button class="btn listen-btn" id="btnListenInput">Вход (исходный)</button>
