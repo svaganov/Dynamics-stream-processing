@@ -120,7 +120,7 @@ function currentEqGains() {
    пресет, сброс и включение EQ шлют все 10 полос воркеру по telnet. */
 async function applyEqLive() {
   if (!currentStationId) return false;
-  if ($("engine").value !== "liquidsoap" || !currentRunning) return false;
+  if (!currentRunning) return false;
   if (!$("eq_enabled").checked) return false;
   const gains = currentEqGains();
   try {
@@ -218,7 +218,6 @@ $("eq_enabled").addEventListener("change", () => { applyEqLive(); });
 
 const FIELDS = {
   bypass:         ["bypass", "bool"],
-  engine:         ["engine"],
   src_url:        ["source", "url"],
   src_reconnect:  ["source", "reconnect", "bool"],
   src_reconnect_delay_max: ["source", "reconnect_delay_max", "num"],
@@ -242,7 +241,6 @@ const FIELDS = {
   lim_ceiling_db: ["limiter", "ceiling_db", "num"],
   lim_attack:     ["limiter", "attack", "num"],
   lim_release:    ["limiter", "release", "num"],
-  enc_codec:      ["encoder", "codec"],
   enc_bitrate:    ["encoder", "bitrate", "num"],
   enc_sample_rate:["encoder", "sample_rate", "num"],
   enc_channels:   ["encoder", "channels", "num"],
@@ -604,10 +602,7 @@ function renderDashboard() {
     const sid = document.createElement("span");
     sid.className = "scard-id";
     sid.textContent = st.id;
-    const eng = document.createElement("span");
-    eng.className = "scard-engine";
-    eng.textContent = st.engine || "ffmpeg";
-    head.append(dot, name, sid, eng);
+    head.append(dot, name, sid);
 
     const urls = document.createElement("div");
     urls.className = "scard-urls";
@@ -1068,13 +1063,8 @@ function updateSelectedStatus(status) {
   $("rpPid").textContent = status && status.running ? status.pid : "—";
   $("rpUptime").textContent = status && status.running ? fmtUptime(status.uptime) : "—";
   $("rpRestarts").textContent = status ? status.restarts : 0;
-  const isLiquidsoap = status && status.engine === "liquidsoap";
-  $("rpFfmpeg").textContent = isLiquidsoap
-    ? "Liquidsoap worker"
-    : (status && status.ffmpeg_found
-        ? (status.ffmpeg_version || "найден").split(" Copyright")[0].replace("ffmpeg version ", "v")
-        : "НЕ НАЙДЕН");
-  $("rpFfmpeg").style.color = status && (status.ffmpeg_found || isLiquidsoap) ? "" : "var(--red)";
+  $("rpFfmpeg").textContent = "Liquidsoap worker";
+  $("rpFfmpeg").style.color = "";
   const running = Boolean(status && status.running);
   currentRunning = running;
   $("btnStart").disabled = !station || running;
@@ -1102,15 +1092,14 @@ function syncIcecastStatus(status) {
   }
 }
 
-/* Живая подстройка (telnet воркера) доступна только для работающей
-   Liquidsoap-станции; для FFmpeg изменения применяются при перезапуске. */
+/* Живая подстройка (telnet воркера) доступна для работающей станции;
+   для остановленной изменения применяются при перезапуске. */
 function syncGainLive() {
-  const engine = $("engine").value;
-  const enabled = engine === "liquidsoap" && currentRunning;
+  const enabled = currentRunning;
   $("btnGainLive").disabled = !enabled;
   $("btnGainLive").title = enabled
     ? "Мгновенно применить к работающему воркеру (без перезапуска)"
-    : "Доступно для работающей станции с движком Liquidsoap — иначе применится при перезапуске";
+    : "Доступно для работающей станции — иначе применится при перезапуске";
 }
 
 $("btnGainLive").addEventListener("click", async () => {
@@ -1139,7 +1128,7 @@ $("btnGainLive").addEventListener("click", async () => {
    само шлёт живую подстройку (с короткой задержкой после остановки). */
 let gainLiveTimer = null;
 $("gain_db").addEventListener("input", () => {
-  if ($("engine").value !== "liquidsoap" || !currentRunning) return;
+  if (!currentRunning) return;
   if (!$("gain_enabled").checked) return;
   clearTimeout(gainLiveTimer);
   gainLiveTimer = setTimeout(async () => {
@@ -1165,7 +1154,7 @@ $("gain_db").addEventListener("input", () => {
 let dynLiveTimer = null;
 function scheduleDynLive() {
   if (!currentStationId) return;
-  if ($("engine").value !== "liquidsoap" || !currentRunning) return;
+  if (!currentRunning) return;
   clearTimeout(dynLiveTimer);
   dynLiveTimer = setTimeout(async () => {
     const body = {};
@@ -1220,7 +1209,7 @@ const SECTION_BY_CHECKBOX = {
 for (const [checkboxId, section] of Object.entries(SECTION_BY_CHECKBOX)) {
   $(checkboxId).addEventListener("change", async () => {
     if (!currentStationId) return;
-    if ($("engine").value !== "liquidsoap" || !currentRunning) return;
+    if (!currentRunning) return;
     const enabled = $(checkboxId).checked;
     try {
       const res = await fetch("/api/streams/" + encodeURIComponent(currentStationId) + "/adjust", {
@@ -1241,7 +1230,7 @@ for (const [checkboxId, section] of Object.entries(SECTION_BY_CHECKBOX)) {
 $("bypass").addEventListener("change", async () => {
   if (!currentStationId) return;
   const enabled = $("bypass").checked;
-  if ($("engine").value !== "liquidsoap" || !currentRunning) return;
+  if (!currentRunning) return;
   try {
     const res = await fetch("/api/streams/" + encodeURIComponent(currentStationId) + "/bypass", {
       method: "POST",

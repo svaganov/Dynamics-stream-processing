@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>FFmpeg → Icecast · Панель управления</title>
+<title>Аудиопроцессор · Панель управления</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -534,11 +534,6 @@
   .scard-status.running { background: var(--green); animation: pulse 1.5s ease-in-out infinite; }
   .scard-name { font-weight: 700; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .scard-id { color: var(--text-dim); font-size: 10.5px; flex: none; }
-  .scard-engine {
-    margin-left: auto; flex: none;
-    font-size: 9.5px; letter-spacing: 0.12em; text-transform: uppercase;
-    color: var(--text-dim); border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px;
-  }
   .scard-urls { display: flex; flex-direction: column; gap: 4px; font-size: 11px; }
   .scard-url { display: flex; gap: 8px; min-width: 0; }
   .scard-url .k { color: var(--text-dim); font-size: 9.5px; letter-spacing: 0.1em; flex: none; width: 44px; padding-top: 1px; }
@@ -579,7 +574,7 @@
       <rect x="11" y="4" width="3" height="15" fill="#ff9f2e"/>
       <rect x="16" y="1" width="3" height="18" fill="#ff5252"/>
     </svg>
-    FFMPEG <span class="arrow">→</span> ICECAST
+    АУДИОПРОЦЕССОР <span class="arrow">→</span> ICECAST
   </div>
 
   <button class="btn only-station" id="btnBack" title="К списку потоков">← Потоки</button>
@@ -790,13 +785,6 @@
       <section class="card s4">
         <div class="card-head"><h2><span class="idx">06</span>Настройка Кодирования</h2></div>
         <div class="fields">
-          <div class="field">
-            <label>Кодек AAC</label>
-            <select id="enc_codec" style="width:100%">
-              <option value="aac">aac (встроенный)</option>
-              <option value="libfdk_aac">libfdk_aac (качественнее)</option>
-            </select>
-          </div>
           <div class="row2">
             <div class="field">
               <label>Битрейт</label>
@@ -852,20 +840,13 @@
           <div class="ice-status" id="iceStatus">
             <span class="dot"></span><span id="iceStatusText">—</span>
           </div>
-          <div class="hint">Изменения применяются при перезапуске станции. Для движка Liquidsoap адреса 127.0.0.1/localhost автоматически подставляются в воркер как host.docker.internal — сервер на этой же машине остаётся достижимым из контейнера</div>
+          <div class="hint">Изменения применяются при перезапуске станции. Адреса 127.0.0.1/localhost автоматически подставляются в воркер как host.docker.internal — сервер на этой же машине остаётся достижимым из контейнера</div>
         </div>
       </section>
 
       <section class="card s4">
         <div class="card-head"><h2><span class="idx">08</span>Служба</h2></div>
         <div class="fields">
-          <div class="field">
-            <label>Движок обработки</label>
-            <select id="engine" style="width:100%">
-              <option value="ffmpeg">FFmpeg — процесс на хосте</option>
-              <option value="liquidsoap">Liquidsoap — Docker-воркер</option>
-            </select>
-          </div>
           <div class="field">
             <div class="checkline">
               <span class="grow">Автоперезапуск при падении</span>
@@ -1102,7 +1083,6 @@ const FIELDS = {
   lim_ceiling_db: ["limiter", "ceiling_db", "num"],
   lim_attack:     ["limiter", "attack", "num"],
   lim_release:    ["limiter", "release", "num"],
-  enc_codec:      ["encoder", "codec"],
   enc_bitrate:    ["encoder", "bitrate", "num"],
   enc_sample_rate:["encoder", "sample_rate", "num"],
   enc_channels:   ["encoder", "channels", "num"],

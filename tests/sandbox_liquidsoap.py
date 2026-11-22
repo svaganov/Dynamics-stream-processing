@@ -1,13 +1,14 @@
-"""Медиапесочница Этапа 2: FFmpeg-станция + Liquidsoap-воркер в Docker.
+"""Медиапесочница: две Liquidsoap-станции (Docker-воркеры) end-to-end.
 
 Поднимает локальный HTTP-источник MP3 с ICY StreamTitle и фейковый Icecast,
-запускает station-1 через процесс FFmpeg (хост) и station-2 через контейнер
-Liquidsoap (доступ к хосту — через host.docker.internal), проверяет:
+запускает обе станции через контейнеры Liquidsoap (доступ к хосту — через
+host.docker.internal), проверяет:
 
 - обе станции реально кодируют AAC/ADTS и пушат на Icecast;
-- StreamTitle доезжает: у FFmpeg — через MetadataRelay (/admin/metadata),
-  у Liquidsoap — сквозь конвейер (виден в его логе);
-- остановка FFmpeg-станции не трогает Docker-воркера и наоборот.
+- StreamTitle проходит сквозь конвейер (виден в логе воркера);
+- остановка одной станции не трогает соседнюю;
+- живая подстройка (gain/EQ/динамика/секции/BYPASS) без перезапуска;
+- резерв при обрыве входа (fallback на заглушку), статусы входа/выхода.
 
 Запуск из корня проекта:
     .test-venv/Scripts/python tests/sandbox_liquidsoap.py
@@ -40,7 +41,7 @@ def host_url(port, path):
 
 
 class LiquidsoapSandboxTest(unittest.TestCase):
-    title = base.IntegrationSandboxTest.title
+    title = "Sandbox Title"
 
     @classmethod
     def setUpClass(cls):
@@ -89,29 +90,36 @@ class LiquidsoapSandboxTest(unittest.TestCase):
         self.client = panel.app.test_client()
 
         self.client.put("/api/settings", json={"ffmpeg_path": self.ffmpeg})
-        # station-1 — FFmpeg-процесс на хосте, источник 127.0.0.1
-        self.client.put("/api/streams/station-1", json={
-            "source": {"url": self.source_url("/source.mp3"), "reconnect": False, "reconnect_delay_max": 1},
-            "icecast": {"host": "127.0.0.1", "port": self.icecast_port, "mount": "/station-1"},
-            "autorestart": {"enabled": False, "delay": 1},
-        })
-        # station-2 — Liquidsoap-воркер в контейнере. Адреса источника и
-        # Icecast специально заданы как 127.0.0.1 (типичная конфигурация
+        # Две станции — обе Liquidsoap-воркеры в контейнерах. Адреса источника
+        # и Icecast специально заданы как 127.0.0.1 (типичная конфигурация
         # пользователя): панель обязана переписать их на host.docker.internal
         # при генерации скрипта воркера (containerize_loopback), иначе из
         # контейнера loopback указывал бы на сам контейнер и поток не пошёл.
-        # id задан явно и уникален: автогенерация дала бы «station-2» — имя
-        # контейнера audio-worker-station-2 совпало бы с демо-воркером
+        # id заданы явно и уникальны: автогенерация дала бы «station-N» — имена
+        # контейнеров audio-worker-station-N совпали бы с демо-воркерами
         # пользователя, и песочница с демо-панелью (автоперезапуск)
-        # перехватывали бы контейнер друг у друга.
+        # перехватывали бы контейнеры друг у друга.
+        created1 = self.client.post("/api/streams", json={
+            "id": "sandbox-liq-1", "name": "Радио Liq 1",
+        }).get_json()["station"]
+        self.station1_id = created1["id"]
+        # Маунты НЕ /station-N: свежий реестр засевается дефолтной станцией
+        # station-1 с маунтом /station-1, и PUT с таким же маунтом был бы
+        # отклонён проверкой уникальности (409) — станция осталась бы
+        # с дефолтным источником и молчала бы.
+        res = self.client.put("/api/streams/" + self.station1_id, json={
+            "source": {"url": self.source_url("/source.mp3"), "reconnect": True, "reconnect_delay_max": 1},
+            "icecast": {"host": "127.0.0.1", "port": self.icecast_port, "mount": "/liq-1"},
+            "autorestart": {"enabled": False, "delay": 1},
+        })
+        self.assertTrue(res.get_json()["ok"], res.get_json())
         created = self.client.post("/api/streams", json={
-            "id": "sandbox-liq-2", "name": "Радио Liq",
+            "id": "sandbox-liq-2", "name": "Радио Liq 2",
         }).get_json()["station"]
         self.station2_id = created["id"]
-        self.client.put("/api/streams/" + self.station2_id, json={
-            "engine": "liquidsoap",
+        res = self.client.put("/api/streams/" + self.station2_id, json={
             "source": {"url": self.source_url("/source.mp3"), "reconnect": True, "reconnect_delay_max": 1},
-            "icecast": {"host": "127.0.0.1", "port": self.icecast_port, "mount": "/station-2"},
+            "icecast": {"host": "127.0.0.1", "port": self.icecast_port, "mount": "/liq-2"},
             "autorestart": {"enabled": False, "delay": 1},
             "gain": {"enabled": True, "db": 0.0},
             "equalizer": {"enabled": True, "gains": [2, 0, 0, 0, 1, 0, 0, 0, 0, 0]},
@@ -123,6 +131,7 @@ class LiquidsoapSandboxTest(unittest.TestCase):
             "loudnorm": {"enabled": True, "i": -14, "tp": -1.5, "lra": 11},
             "limiter": {"enabled": True, "ceiling_db": -1.0, "attack": 5, "release": 50},
         })
+        self.assertTrue(res.get_json()["ok"], res.get_json())
 
     def tearDown(self):
         for manager in list(panel._managers.values()):
@@ -170,55 +179,54 @@ class LiquidsoapSandboxTest(unittest.TestCase):
             time.sleep(0.2)
         self.fail("Icecast не получил {} байт для {}".format(minimum, mount))
 
-    def test_mixed_engines_end_to_end(self):
-        self.assertTrue(self.client.post("/api/streams/station-1/start").get_json()["ok"])
+    def test_two_stations_end_to_end(self):
+        """Две Liquidsoap-станции параллельно: обе кодируют AAC, стопы изолированы."""
+        self.assertTrue(self.client.post("/api/streams/" + self.station1_id + "/start").get_json()["ok"])
         res = self.client.post("/api/streams/" + self.station2_id + "/start").get_json()
         self.assertTrue(res["ok"], res)
 
-        body1 = self.wait_for_body("/station-1", 20000)
-        body2 = self.wait_for_body("/station-2", 20000)
+        body1 = self.wait_for_body("/liq-1", 20000)
+        body2 = self.wait_for_body("/liq-2", 20000)
         self.assertTrue(body1.startswith(b"\xff\xf1") or body1.startswith(b"\xff\xf9"), "station-1 не ADTS")
-        self.assertTrue(body2.startswith(b"\xff\xf1") or body2.startswith(b"\xff\xf9"), "station-2 (Liquidsoap) не ADTS")
+        self.assertTrue(body2.startswith(b"\xff\xf1") or body2.startswith(b"\xff\xf9"), "station-2 не ADTS")
 
-        # StreamTitle: FFmpeg-станция — через MetadataRelay на /admin/metadata;
-        # Liquidsoap проворачивает метаданные сквозь конвейер — видно в его логе.
-        deadline = time.time() + 15
-        while time.time() < deadline:
-            if self.icecast.metadata_updates.get("/station-1") == self.title:
-                break
-            time.sleep(0.2)
-        self.assertEqual(self.icecast.metadata_updates.get("/station-1"), self.title)
+        # StreamTitle проходит сквозь конвейер Liquidsoap — виден в логе воркера.
+        self.wait_logs_contain(self.station1_id, self.title)
         self.wait_logs_contain(self.station2_id, self.title)
 
-        # Статусы и изоляция: остановка FFmpeg-станции не трогает воркера.
+        st1 = self.client.get("/api/streams/" + self.station1_id + "/status").get_json()
         st2 = self.client.get("/api/streams/" + self.station2_id + "/status").get_json()
+        self.assertEqual(st1["engine"], "liquidsoap")
         self.assertEqual(st2["engine"], "liquidsoap")
-        self.assertTrue(st2["running"])
+        self.assertTrue(st1["running"] and st2["running"])
+        self.assertTrue(st1["container"].startswith("audio-worker-"))
         self.assertTrue(st2["container"].startswith("audio-worker-"))
 
-        self.assertTrue(self.client.post("/api/streams/station-1/stop").get_json()["ok"])
+        # Изоляция: остановка первой станции не трогает вторую.
+        self.assertTrue(self.client.post("/api/streams/" + self.station1_id + "/stop").get_json()["ok"])
         time.sleep(1.5)
         st2_after = self.client.get("/api/streams/" + self.station2_id + "/status").get_json()
-        self.assertTrue(st2_after["running"], "остановка FFmpeg-станции остановила воркер")
+        self.assertTrue(st2_after["running"], "остановка соседней станции остановила воркер")
         self.assertEqual(st2["pid"], st2_after["pid"])
 
-        # И обратная изоляция: остановка воркера не трогает FFmpeg-станцию.
-        self.assertTrue(self.client.post("/api/streams/station-1/start").get_json()["ok"])
+        # И обратная изоляция: остановка второй не трогает первую.
+        self.assertTrue(self.client.post("/api/streams/" + self.station1_id + "/start").get_json()["ok"])
         self.assertTrue(self.client.post("/api/streams/" + self.station2_id + "/stop").get_json()["ok"])
         time.sleep(1.5)
-        st1_after = self.client.get("/api/streams/station-1/status").get_json()
-        self.assertTrue(st1_after["running"], "остановка воркера остановила FFmpeg-станцию")
+        st1_after = self.client.get("/api/streams/" + self.station1_id + "/status").get_json()
+        self.assertTrue(st1_after["running"], "остановка второй станции остановила первую")
         st2_stopped = self.client.get("/api/streams/" + self.station2_id + "/status").get_json()
         self.assertFalse(st2_stopped["running"])
 
         health = self.client.get("/api/health").get_json()
         engines = {s["id"]: s["engine"] for s in health["stations"]}
+        self.assertEqual(engines[self.station1_id], "liquidsoap")
         self.assertEqual(engines[self.station2_id], "liquidsoap")
 
     def test_live_gain_adjust_without_restart(self):
         res = self.client.post("/api/streams/" + self.station2_id + "/start").get_json()
         self.assertTrue(res["ok"], res)
-        self.wait_for_body("/station-2", 50000)
+        self.wait_for_body("/liq-2", 50000)
 
         manager = panel.get_manager(self.station2_id)
 
@@ -248,8 +256,8 @@ class LiquidsoapSandboxTest(unittest.TestCase):
         self.assertEqual(station["gain"], {"enabled": True, "db": 6.0})
 
         # Поток не прервался: тело наращивается и остаётся ADTS.
-        before = len(bytes(self.icecast.bodies.get("/station-2", b"")))
-        body = self.wait_for_body("/station-2", before + 20000)
+        before = len(bytes(self.icecast.bodies.get("/liq-2", b"")))
+        body = self.wait_for_body("/liq-2", before + 20000)
         self.assertTrue(body.startswith(b"\xff\xf1") or body.startswith(b"\xff\xf9"))
 
         # Контейнер не пересоздавался: pid не сменился.
@@ -259,7 +267,7 @@ class LiquidsoapSandboxTest(unittest.TestCase):
     def test_live_bypass_without_restart(self):
         res = self.client.post("/api/streams/" + self.station2_id + "/start").get_json()
         self.assertTrue(res["ok"], res)
-        self.wait_for_body("/station-2", 20000)
+        self.wait_for_body("/liq-2", 20000)
 
         manager = panel.get_manager(self.station2_id)
 
@@ -280,8 +288,8 @@ class LiquidsoapSandboxTest(unittest.TestCase):
         self.assertTrue(station["bypass"])
 
         # Поток не прервался: тело наращивается и остаётся ADTS.
-        before = len(bytes(self.icecast.bodies.get("/station-2", b"")))
-        body = self.wait_for_body("/station-2", before + 20000)
+        before = len(bytes(self.icecast.bodies.get("/liq-2", b"")))
+        body = self.wait_for_body("/liq-2", before + 20000)
         self.assertTrue(body.startswith(b"\xff\xf1") or body.startswith(b"\xff\xf9"))
 
         # Снимаем BYPASS — снова живьём.
@@ -296,7 +304,7 @@ class LiquidsoapSandboxTest(unittest.TestCase):
     def test_live_eq_adjust_without_restart(self):
         res = self.client.post("/api/streams/" + self.station2_id + "/start").get_json()
         self.assertTrue(res["ok"], res)
-        self.wait_for_body("/station-2", 20000)
+        self.wait_for_body("/liq-2", 20000)
 
         manager = panel.get_manager(self.station2_id)
 
@@ -323,8 +331,8 @@ class LiquidsoapSandboxTest(unittest.TestCase):
         self.assertEqual(station["equalizer"]["gains"], gains)
 
         # Поток не прервался: тело наращивается и остаётся ADTS.
-        before = len(bytes(self.icecast.bodies.get("/station-2", b"")))
-        body = self.wait_for_body("/station-2", before + 20000)
+        before = len(bytes(self.icecast.bodies.get("/liq-2", b"")))
+        body = self.wait_for_body("/liq-2", before + 20000)
         self.assertTrue(body.startswith(b"\xff\xf1") or body.startswith(b"\xff\xf9"))
 
     def test_live_dyn_adjust_without_restart(self):
@@ -333,7 +341,7 @@ class LiquidsoapSandboxTest(unittest.TestCase):
         # Полная цепочка (compress → loudnorm-граф → limit) работает в рантайме:
         # тело копится — иначе clock-стыковка графа с нативными операторами
         # уже уронила бы воркер.
-        self.wait_for_body("/station-2", 20000)
+        self.wait_for_body("/liq-2", 20000)
 
         manager = panel.get_manager(self.station2_id)
 
@@ -362,8 +370,8 @@ class LiquidsoapSandboxTest(unittest.TestCase):
         self.assertEqual(station["limiter"]["ceiling_db"], -3.0)
 
         # Поток не прервался: тело наращивается и остаётся ADTS.
-        before = len(bytes(self.icecast.bodies.get("/station-2", b"")))
-        body = self.wait_for_body("/station-2", before + 20000)
+        before = len(bytes(self.icecast.bodies.get("/liq-2", b"")))
+        body = self.wait_for_body("/liq-2", before + 20000)
         self.assertTrue(body.startswith(b"\xff\xf1") or body.startswith(b"\xff\xf9"))
 
     def test_live_section_toggle_without_restart(self):
@@ -373,7 +381,7 @@ class LiquidsoapSandboxTest(unittest.TestCase):
         # сохранились в реестре, а поток идёт дальше без перезапуска.
         res = self.client.post("/api/streams/" + self.station2_id + "/start").get_json()
         self.assertTrue(res["ok"], res)
-        self.wait_for_body("/station-2", 20000)
+        self.wait_for_body("/liq-2", 20000)
 
         manager = panel.get_manager(self.station2_id)
         host_port = manager.telnet_host_port()
@@ -396,8 +404,8 @@ class LiquidsoapSandboxTest(unittest.TestCase):
         self.assertFalse(station["equalizer"]["enabled"])
 
         # Поток не прервался: тело наращивается и остаётся ADTS.
-        before = len(bytes(self.icecast.bodies.get("/station-2", b"")))
-        body = self.wait_for_body("/station-2", before + 20000)
+        before = len(bytes(self.icecast.bodies.get("/liq-2", b"")))
+        body = self.wait_for_body("/liq-2", before + 20000)
         self.assertTrue(body.startswith(b"\xff\xf1") or body.startswith(b"\xff\xf9"))
 
         # Возвращаем секции — снова живьём.
@@ -411,8 +419,8 @@ class LiquidsoapSandboxTest(unittest.TestCase):
         self.assertTrue(station["compressor"]["enabled"])
         self.assertTrue(station["equalizer"]["enabled"])
 
-        before = len(bytes(self.icecast.bodies.get("/station-2", b"")))
-        body = self.wait_for_body("/station-2", before + 20000)
+        before = len(bytes(self.icecast.bodies.get("/liq-2", b"")))
+        body = self.wait_for_body("/liq-2", before + 20000)
         self.assertTrue(body.startswith(b"\xff\xf1") or body.startswith(b"\xff\xf9"))
 
     def _wait_icecast_connected(self, expected, timeout=20):
@@ -429,7 +437,7 @@ class LiquidsoapSandboxTest(unittest.TestCase):
     def test_icecast_connected_status_flag(self):
         res = self.client.post("/api/streams/" + self.station2_id + "/start").get_json()
         self.assertTrue(res["ok"], res)
-        self.wait_for_body("/station-2", 20000)
+        self.wait_for_body("/liq-2", 20000)
 
         # Подключение к Icecast установлено — живой флаг true.
         self._wait_icecast_connected(True)
@@ -478,11 +486,11 @@ class LiquidsoapSandboxTest(unittest.TestCase):
         res = self.client.post("/api/streams/" + self.station2_id + "/start").get_json()
         self.assertTrue(res["ok"], res)
         # Выход растёт от заглушки и это валидный AAC/ADTS-поток.
-        body = self.wait_for_body("/station-2", 20000, timeout=60)
+        body = self.wait_for_body("/liq-2", 20000, timeout=60)
         self.assertTrue(body.startswith(b"\xff\xf1") or body.startswith(b"\xff\xf9"))
         self._wait_input_connected(False, timeout=30)
         before = len(body)
-        self.wait_for_body("/station-2", before + 15000, timeout=60)
+        self.wait_for_body("/liq-2", before + 15000, timeout=60)
 
         # Возвращаем живой источник: после перезапуска вход подключается,
         # эфир продолжает расти уже с реальным звуком.
@@ -493,8 +501,8 @@ class LiquidsoapSandboxTest(unittest.TestCase):
         res = self.client.post("/api/streams/" + self.station2_id + "/restart").get_json()
         self.assertTrue(res["ok"], res)
         self._wait_input_connected(True, timeout=30)
-        before = len(bytes(self.icecast.bodies.get("/station-2", b"")))
-        self.wait_for_body("/station-2", before + 15000, timeout=60)
+        before = len(bytes(self.icecast.bodies.get("/liq-2", b"")))
+        self.wait_for_body("/liq-2", before + 15000, timeout=60)
 
 
 if __name__ == "__main__":

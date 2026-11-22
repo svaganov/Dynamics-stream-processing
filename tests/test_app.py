@@ -91,6 +91,71 @@ class FakeLiquidsoapContainer:
         pass
 
 
+class FakeWorkerContainer:
+    """Полная эмуляция контейнера воркера для юнит-тестов без демона Docker."""
+
+    def __init__(self, name, pid):
+        self.name = name
+        self.pid = pid
+        self.status = "created"
+        self.stopped = False
+        self.removed = False
+        self.attrs = {
+            "NetworkSettings": {"Ports": {}},
+            "State": {"Pid": None, "StartedAt": "", "ExitCode": None},
+        }
+
+    def start(self):
+        from datetime import datetime, timezone
+        self.status = "running"
+        self.attrs["State"]["Pid"] = self.pid
+        self.attrs["State"]["StartedAt"] = datetime.now(timezone.utc).isoformat()
+
+    def stop(self, timeout=5):
+        self.stopped = True
+        self.status = "exited"
+        self.attrs["State"]["Pid"] = None
+
+    def kill(self):
+        self.stopped = True
+        self.status = "exited"
+        self.attrs["State"]["Pid"] = None
+
+    def remove(self, force=False):
+        self.removed = True
+
+    def reload(self):
+        pass
+
+    def logs(self, **kwargs):
+        return iter(())
+
+    def die(self):
+        # аварийное завершение воркера (контейнер умер сам)
+        self.status = "exited"
+        self.attrs["State"]["Pid"] = None
+        self.attrs["State"]["ExitCode"] = 1
+
+
+class FakeDockerContainers:
+    def __init__(self):
+        self.created = []
+
+    def list(self, all=True, filters=None):
+        name = (filters or {}).get("name")
+        return [c for c in self.created if c.name == name and not c.removed]
+
+    def create(self, image, name=None, **kwargs):
+        container = FakeWorkerContainer(name, 1000 + len(self.created))
+        self.created.append(container)
+        return container
+
+
+class FakeDockerClient:
+    def __init__(self):
+        self.containers = FakeDockerContainers()
+
+
 class PanelApiTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -108,6 +173,13 @@ class PanelApiTest(unittest.TestCase):
             manager.stop()
         panel._managers.clear()
         self.tmp.cleanup()
+
+    def make_fake_docker(self):
+        """Подменяет демон Docker фейковым клиентом (воркеры-контейнеры)."""
+        client = FakeDockerClient()
+        patcher = mock.patch.object(
+            panel.DockerWorkerManager, "_docker_client", return_value=client)
+        return patcher, client
 
     def make_fake_popen(self):
         calls = []
@@ -183,27 +255,28 @@ class PanelApiTest(unittest.TestCase):
         })
         self.assertEqual(res.status_code, 200)
         text = res.get_json()["text"]
-        self.assertIn("source:***@127.0.0.1:8000", text)
+        # предпросмотр — это скрипт воркера, пароль в нём замаскирован
+        self.assertIn('password="***"', text)
         self.assertNotIn("super-secret", text)
 
-    def test_gain_filter_in_ffmpeg_chain(self):
+    def test_gain_in_liq_chain(self):
         res = self.client.post("/api/streams/station-1/command", json={
             "equalizer": {"enabled": True, "gains": [3] + [0] * 9},
             "gain": {"enabled": True, "db": 2.5},
             "compressor": {"enabled": True},
         })
         text = res.get_json()["text"]
-        pos_eq = text.index("equalizer=f=31")
-        pos_vol = text.index("volume=2.5dB")
-        pos_comp = text.index("acompressor=")
-        self.assertLess(pos_eq, pos_vol)
-        self.assertLess(pos_vol, pos_comp)
+        pos_eq = text.index("filter.iir.eq.peak(frequency=31")
+        pos_gain = text.index("gain_stage = amplify(panel_gain")
+        pos_comp = text.index("comp_stage = compress(")
+        self.assertLess(pos_eq, pos_gain)
+        self.assertLess(pos_gain, pos_comp)
 
-        # выключенное/нулевое усиление не порождает фильтр
+        # выключенное усиление не попадает в цепочку
         res = self.client.post("/api/streams/station-1/command", json={
             "gain": {"enabled": False, "db": 0},
         })
-        self.assertNotIn("volume=", res.get_json()["text"])
+        self.assertNotIn("gain_stage", res.get_json()["text"])
 
         # кламп диапазона ±24 дБ через API станции
         updated = self.client.put("/api/streams/station-1", json={
@@ -218,11 +291,6 @@ class PanelApiTest(unittest.TestCase):
         self.assertEqual(res.status_code, 400)
         res = self.client.post("/api/streams/station-1/adjust", json={"gain_db": None})
         self.assertEqual(res.status_code, 400)
-
-    def test_adjust_rejected_for_ffmpeg_engine(self):
-        res = self.client.post("/api/streams/station-1/adjust", json={"gain_db": 3.0})
-        self.assertEqual(res.status_code, 409)
-        self.assertIn("liquidsoap", res.get_json()["error"].lower())
 
     def test_adjust_rejected_when_worker_not_running(self):
         res = self.client.post("/api/streams", json={"name": "Радио LQ", "engine": "liquidsoap"})
@@ -276,11 +344,6 @@ class PanelApiTest(unittest.TestCase):
         manager = panel.get_manager(station_id)
         manager.container = FakeLiquidsoapContainer()
         return station_id, manager
-
-    def test_bypass_rejected_for_ffmpeg_engine(self):
-        res = self.client.post("/api/streams/station-1/bypass", json={"enabled": True})
-        self.assertEqual(res.status_code, 409)
-        self.assertIn("liquidsoap", res.get_json()["error"].lower())
 
     def test_bypass_rejected_when_worker_not_running(self):
         res = self.client.post("/api/streams", json={"name": "Радио LQ", "engine": "liquidsoap"})
@@ -666,22 +729,16 @@ class PanelApiTest(unittest.TestCase):
     def test_process_isolation_and_autorestart(self):
         res = self.client.post("/api/streams", json={"name": "Радио 2"})
         station2_id = res.get_json()["station"]["id"]
-        res = self.client.put("/api/settings", json={"ffmpeg_path": str(self.fake_ffmpeg)})
-        self.assertTrue(res.get_json()["ok"])
         res = self.client.put("/api/streams/station-1", json={
             "autorestart": {"enabled": True, "delay": 1},
         })
         self.assertTrue(res.get_json()["ok"])
 
-        popen_patch, calls, procs = self.make_fake_popen()
+        popen_patch, client = self.make_fake_docker()
         with popen_patch:
-            def stream_items():
-                # Вызовы ffmpeg -version из статуса не являются аудиопайплайнами.
-                return [(c, p) for c, p in zip(calls, procs) if len(c) > 1 and c[1] != "-version"]
-
             self.assertTrue(self.client.post("/api/streams/station-1/start").get_json()["ok"])
             self.assertTrue(self.client.post("/api/streams/" + station2_id + "/start").get_json()["ok"])
-            self.assertEqual(len(stream_items()), 2)
+            self.assertEqual(len(client.containers.created), 2)
 
             status1 = self.client.get("/api/streams/station-1/status").get_json()
             status2 = self.client.get("/api/streams/" + station2_id + "/status").get_json()
@@ -689,22 +746,24 @@ class PanelApiTest(unittest.TestCase):
             self.assertTrue(status2["running"])
             self.assertNotEqual(status1["pid"], status2["pid"])
 
+            c1, c2 = client.containers.created
             self.assertTrue(self.client.post("/api/streams/station-1/stop").get_json()["ok"])
-            self.assertTrue(stream_items()[0][1].terminated)
-            self.assertFalse(stream_items()[1][1].terminated)
+            self.assertTrue(c1.stopped)
+            self.assertFalse(c2.stopped)
             self.assertTrue(self.client.get("/api/streams/" + station2_id + "/status").get_json()["running"])
 
-            # Перезапускаем первую станцию и эмулируем падение процесса.
+            # Перезапускаем первую станцию и эмулируем падение контейнера.
             self.assertTrue(self.client.post("/api/streams/station-1/restart").get_json()["ok"])
-            self.assertEqual(len(stream_items()), 3)
-            stream_items()[2][1].die()
+            self.assertEqual(len(client.containers.created), 3)
+            client.containers.created[2].die()
 
-            deadline = time.time() + 5
+            deadline = time.time() + 8
             while time.time() < deadline:
-                if len(stream_items()) >= 4:
+                if len(client.containers.created) >= 4:
                     break
                 time.sleep(0.05)
-            self.assertGreaterEqual(len(stream_items()), 4, "watchdog не перезапустил упавшую станцию")
+            self.assertGreaterEqual(len(client.containers.created), 4,
+                                    "watchdog не перезапустил упавшую станцию")
 
             manager1 = panel.get_manager("station-1")
             manager2 = panel.get_manager(station2_id)
@@ -713,7 +772,7 @@ class PanelApiTest(unittest.TestCase):
                 time.sleep(0.05)
             self.assertGreaterEqual(manager1.restarts, 1)
             self.assertEqual(manager2.restarts, 0)
-            self.assertFalse(stream_items()[1][1].terminated, "соседняя станция не должна пострадать")
+            self.assertFalse(c2.stopped, "соседняя станция не должна пострадать")
 
             logs = self.client.get("/api/streams/station-1/logs?since=0").get_json()["logs"]
             self.assertTrue(any("автоперезапуск выполнен" in item["line"] for item in logs))
@@ -721,15 +780,15 @@ class PanelApiTest(unittest.TestCase):
     def test_delete_stops_only_selected_station(self):
         res = self.client.post("/api/streams", json={"name": "Радио 2"})
         station2_id = res.get_json()["station"]["id"]
-        self.client.put("/api/settings", json={"ffmpeg_path": str(self.fake_ffmpeg)})
 
-        popen_patch, calls, procs = self.make_fake_popen()
+        popen_patch, client = self.make_fake_docker()
         with popen_patch:
             self.client.post("/api/streams/station-1/start")
             self.client.post("/api/streams/" + station2_id + "/start")
             self.assertEqual(self.client.delete("/api/streams/station-1").status_code, 200)
-            self.assertTrue(procs[0].terminated)
-            self.assertFalse(procs[1].terminated)
+            c1, c2 = client.containers.created
+            self.assertTrue(c1.stopped)
+            self.assertFalse(c2.stopped)
 
         data = self.client.get("/api/streams").get_json()
         self.assertEqual([s["id"] for s in data["streams"]], [station2_id])

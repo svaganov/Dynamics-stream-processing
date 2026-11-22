@@ -303,11 +303,13 @@ class EngineDispatchTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_engine_normalized_and_dispatched(self):
+        # единственный движок — liquidsoap; миграция старых конфигов и
+        # неизвестные значения приводятся к нему
         station = self.client.post("/api/streams", json={"name": "Liq"}).get_json()["station"]
-        self.assertEqual(station["engine"], "ffmpeg")
+        self.assertEqual(station["engine"], "liquidsoap")
 
         updated = self.client.put("/api/streams/" + station["id"], json={
-            "engine": "liquidsoap",
+            "engine": "ffmpeg",  # старое значение из реестра — мигрирует
             "gain": {"enabled": True, "db": 40},
         }).get_json()["station"]
         self.assertEqual(updated["engine"], "liquidsoap")
@@ -318,11 +320,6 @@ class EngineDispatchTest(unittest.TestCase):
         status = manager.status()
         self.assertEqual(status["engine"], "liquidsoap")
         self.assertFalse(status["running"])
-
-        # обратная смена движка пересоздаёт менеджер
-        self.client.put("/api/streams/" + station["id"], json={"engine": "ffmpeg"})
-        manager = panel.get_manager(station["id"])
-        self.assertIsInstance(manager, panel.ProcessManager)
 
     def test_command_endpoint_returns_liq_for_liquidsoap(self):
         station = self.client.post("/api/streams", json={"name": "Liq"}).get_json()["station"]

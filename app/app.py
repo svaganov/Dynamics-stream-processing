@@ -12,7 +12,6 @@
     HOST=0.0.0.0 PORT=8770 python app.py
 """
 
-import base64
 import copy
 import json
 import os
@@ -23,9 +22,7 @@ import subprocess
 import sys
 import threading
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from collections import deque
 
 from flask import Flask, Response, jsonify, request, send_file, stream_with_context
@@ -68,7 +65,10 @@ DEFAULT_STREAM_CONFIG = {
     "name": "Станция 1",
     "enabled": True,
     "bypass": False,        # True = обход всей обработки (decode -> encode без фильтров)
-    "engine": "ffmpeg",     # ffmpeg (процесс) | liquidsoap (Docker-воркер)
+    # Единственный движок — Liquidsoap (Docker-воркер). Поле оставлено в модели
+    # для совместимости со статусом/карточками; нормализация всегда ставит
+    # "liquidsoap" (миграция станций со старым engine=ffmpeg).
+    "engine": "liquidsoap",
     "source": {
         "url": "http://127.0.0.1:8000/input",
         "reconnect": True,
@@ -109,7 +109,7 @@ DEFAULT_STREAM_CONFIG = {
         "release": 50,      # ms
     },
     "encoder": {
-        "codec": "aac",     # aac | libfdk_aac
+        # кодирование всегда FDK-AAC в воркере Liquidsoap (%fdkaac)
         "bitrate": 128,     # kbps
         "sample_rate": 44100,
         "channels": 2,
@@ -194,10 +194,9 @@ def _normalize_station(raw, fallback_id=None, fallback_name=None):
     station["name"] = str(station.get("name") or fallback_name or station_id).strip() or station_id
     station["enabled"] = bool(station.get("enabled", True))
 
-    engine = str(station.get("engine") or "ffmpeg").strip().lower()
-    if engine not in ("ffmpeg", "liquidsoap"):
-        engine = "ffmpeg"
-    station["engine"] = engine
+    # Миграция: станции со старым engine=ffmpeg переводятся на Liquidsoap —
+    # FFmpeg-движок (процесс на хосте) удалён, единственный тракт — воркер.
+    station["engine"] = "liquidsoap"
 
     gain = station.get("gain") if isinstance(station.get("gain"), dict) else {}
     station["gain"] = {
@@ -444,89 +443,12 @@ def save_config(cfg):
         return load_config()
 
 
-# --------------------------------------------------------------- command ---
-
-
-def build_command(cfg):
-    """Собирает argv FFmpeg из плоского runtime-конфига одной станции."""
-    filters = []
-
-    if not cfg.get("bypass"):
-        # Эквалайзер — первым в цепочке: сначала спектр, потом динамика.
-        # Полосы с нулевым усилением пропускаем, чтобы не плодить фильтры.
-        eq = cfg["equalizer"]
-        if eq.get("enabled"):
-            for freq, gain in zip(EQ_FREQS, eq.get("gains", [])):
-                if abs(float(gain)) > 0.01:
-                    filters.append("equalizer=f={}:t=o:w=1:g={}".format(freq, gain))
-
-        # Статическое усиление — после EQ, до компрессора (та же точка цепочки,
-        # что и ffmpeg.filter.volume в воркере Liquidsoap).
-        gain = cfg.get("gain") or {}
-        if gain.get("enabled"):
-            db = float(gain.get("db", 0.0) or 0.0)
-            if abs(db) > 0.01:
-                filters.append("volume={:g}dB".format(db))
-
-        comp = cfg["compressor"]
-        if comp.get("enabled"):
-            filters.append(
-                "acompressor=threshold={t}dB:ratio={r}:attack={a}:release={rel}:makeup={m}dB".format(
-                    t=comp["threshold"], r=comp["ratio"],
-                    a=comp["attack"], rel=comp["release"], m=comp["makeup"],
-                )
-            )
-
-        ln = cfg["loudnorm"]
-        if ln.get("enabled"):
-            filters.append("loudnorm=I={i}:TP={tp}:LRA={lra}".format(
-                i=ln["i"], tp=ln["tp"], lra=ln["lra"]))
-
-        lim = cfg["limiter"]
-        if lim.get("enabled"):
-            ceiling = round(10 ** (float(lim["ceiling_db"]) / 20.0), 6)
-            filters.append("alimiter=limit={c}:attack={a}:release={r}".format(
-                c=ceiling, a=lim["attack"], r=lim["release"]))
-
-    ffmpeg_bin = (cfg.get("ffmpeg_path") or "").strip() or "ffmpeg"
-
-    cmd = [ffmpeg_bin, "-hide_banner", "-loglevel", "info", "-stats_period", "2"]
-
-    src = cfg["source"]
-    if src.get("reconnect"):
-        cmd += ["-reconnect", "1", "-reconnect_streamed", "1",
-                "-reconnect_delay_max", str(src.get("reconnect_delay_max", 5))]
-
-    cmd += ["-i", src["url"]]
-
-    if filters:
-        cmd += ["-af", ",".join(filters)]
-
-    enc = cfg["encoder"]
-    cmd += ["-vn", "-c:a", enc["codec"], "-b:a", "{}k".format(enc["bitrate"]),
-            "-ar", str(enc["sample_rate"]), "-ac", str(enc["channels"])]
-
-    ice = cfg["icecast"]
-    ice_url = "icecast://{user}:{pw}@{host}:{port}/{mount}".format(
-        user=ice["user"], pw=ice["password"],
-        host=ice["host"], port=ice["port"],
-        mount=str(ice["mount"]).lstrip("/"),
-    )
-    cmd += ["-f", "adts", ice_url]
-    return cmd
-
-
 _ICECAST_URL_RE = re.compile(r"(icecast://[^:/\s]+):[^@\s]+@")
 
 
 def _mask_line(line):
     """Маскирует пароль в URL icecast://user:pass@host, которые печатает сам FFmpeg."""
     return _ICECAST_URL_RE.sub(r"\1:***@", line)
-
-
-def masked_command(cmd):
-    """Команда с замаскированным паролем Icecast — для лога и API."""
-    return [_mask_line(part) for part in cmd]
 
 
 def station_runtime_config(station, settings=None):
@@ -550,352 +472,6 @@ def find_ffmpeg(cfg):
         return resolved, first.strip() or None
     except (OSError, subprocess.SubprocessError):
         return resolved, None
-
-
-# ------------------------------------------------------------- metadata ---
-
-# FFmpeg корректно встраивает StreamTitle в MP3-выход, но ADTS/AAC в Icecast
-# отдаёт без динамических metadata-блоков. Поэтому для AAC-пайплайна title
-# читается отдельным лёгким ICY-подключением и публикуется стандартным
-# Icecast endpoint /admin/metadata, не затрагивая аудиоданные.
-_STREAM_TITLE_RE = re.compile(r"StreamTitle='((?:[^']|'')*)';")
-
-
-class MetadataRelay:
-    def __init__(self, station_id, cfg, logger):
-        self.station_id = station_id
-        self.cfg = copy.deepcopy(cfg)
-        self.logger = logger
-        self.stop_event = threading.Event()
-        self.thread = None
-        self.last_title = None
-
-    def start(self):
-        self.stop()
-        self.stop_event.clear()
-        self.thread = threading.Thread(target=self._run, daemon=True)
-        self.thread.start()
-
-    def stop(self):
-        self.stop_event.set()
-        thread = self.thread
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=2)
-        self.thread = None
-
-    def log(self, text):
-        self.logger.log("[metadata] {}".format(text))
-
-    def _run(self):
-        url = str(self.cfg["source"].get("url") or "").strip()
-        response = None
-        try:
-            request = urllib.request.Request(url, headers={
-                "Icy-MetaData": "1",
-                "User-Agent": "KimiAudioPanel/1.0",
-            })
-            response = urllib.request.urlopen(request, timeout=10)
-            metaint = int(response.headers.get("icy-metaint") or "0")
-            if metaint <= 0:
-                self.log("источник не объявил icy-metaint — динамические metadata недоступны")
-                return
-            self.log("слежу за ICY-метаданными, интервал {} байт".format(metaint))
-
-            while not self.stop_event.is_set():
-                try:
-                    if not self._skip_audio(response, metaint):
-                        self.log("источник закрыл поток")
-                        break
-                    size_raw = self._read_exact(response, 1)
-                    if not size_raw:
-                        self.log("источник закрыл поток")
-                        break
-                    block_size = size_raw[0] * 16
-                    block = self._read_exact(response, block_size) if block_size else b""
-                    title = self._extract_stream_title(block)
-                    if title is not None and title != self.last_title:
-                        self.last_title = title
-                        self._publish_title(title)
-                except (socket.timeout, TimeoutError):
-                    continue
-                except (OSError, urllib.error.URLError) as exc:
-                    if not self.stop_event.is_set():
-                        self.log("поток метаданных прерван: {}".format(exc))
-                    break
-        except (OSError, ValueError, urllib.error.URLError) as exc:
-            if not self.stop_event.is_set():
-                self.log("не удалось открыть metadata-поток: {}".format(exc))
-        finally:
-            if response is not None:
-                try:
-                    response.close()
-                except OSError:
-                    pass
-
-    @staticmethod
-    def _read_exact(response, size):
-        chunks = []
-        remaining = size
-        while remaining > 0:
-            chunk = response.read(remaining)
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        return b"".join(chunks)
-
-    def _skip_audio(self, response, size):
-        remaining = size
-        while remaining > 0:
-            chunk = response.read(min(8192, remaining))
-            if not chunk:
-                return False
-            remaining -= len(chunk)
-        return True
-
-    @staticmethod
-    def _extract_stream_title(block):
-        if not block:
-            return None
-        text = block.decode("utf-8", errors="replace")
-        match = _STREAM_TITLE_RE.search(text)
-        if not match:
-            return None
-        return match.group(1).replace("''", "'").strip()
-
-    def _publish_title(self, title):
-        ice = self.cfg["icecast"]
-        host = str(ice.get("host") or "").strip()
-        scheme = "http"
-        if host.startswith("http://"):
-            host = host[len("http://"):]
-        elif host.startswith("https://"):
-            scheme = "https"
-            host = host[len("https://"):]
-        query = urllib.parse.urlencode({
-            "mount": str(ice.get("mount") or ""),
-            "mode": "updinfo",
-            "song": title,
-        })
-        url = "{}://{}:{}/admin/metadata?{}".format(
-            scheme, host, int(ice.get("port", 8000)), query,
-        )
-        user = str(ice.get("user") or "source")
-        password = str(ice.get("password") or "")
-        auth = base64.b64encode("{}:{}".format(user, password).encode("utf-8")).decode("ascii")
-
-        try:
-            request = urllib.request.Request(url, headers={
-                "Authorization": "Basic {}".format(auth),
-                "User-Agent": "KimiAudioPanel/1.0",
-            })
-            with urllib.request.urlopen(request, timeout=5) as response:
-                response.read()
-            self.log("StreamTitle обновлён на Icecast")
-        except urllib.error.HTTPError as exc:
-            self.log("Icecast не принял metadata: HTTP {}".format(exc.code))
-        except (OSError, ValueError, urllib.error.URLError) as exc:
-            self.log("не удалось опубликовать metadata: {}".format(exc))
-
-
-# --------------------------------------------------------- process manager ---
-
-
-class ProcessManager:
-    def __init__(self, station_id):
-        self.station_id = station_id
-        self.lock = threading.Lock()
-        self.proc = None
-        self.manual_stop = True
-        self.started_at = None
-        self.restarts = 0
-        self.last_exit = None
-        self.logs = deque(maxlen=3000)
-        self.next_log_id = 1
-        self._run_cfg = None
-        self._ffmpeg_cache = (0.0, None, None)  # (ts, path, version)
-        self.metadata_relay = None
-        threading.Thread(target=self._watchdog, daemon=True).start()
-
-    # ------------------------------------------------------------- logging
-
-    def log(self, text):
-        with self.lock:
-            self.logs.append({
-                "id": self.next_log_id,
-                "ts": time.strftime("%H:%M:%S"),
-                "line": text,
-            })
-            self.next_log_id += 1
-
-    def logs_since(self, since):
-        with self.lock:
-            items = [entry for entry in self.logs if entry["id"] > since]
-            return items, self.next_log_id - 1
-
-    # ------------------------------------------------------------ control
-
-    def _start_metadata_relay(self, cfg):
-        self._stop_metadata_relay()
-        relay = MetadataRelay(self.station_id, cfg, self)
-        self.metadata_relay = relay
-        relay.start()
-
-    def _stop_metadata_relay(self):
-        relay = self.metadata_relay
-        self.metadata_relay = None
-        if relay is not None:
-            relay.stop()
-
-    def start(self, cfg):
-        with self.lock:
-            if self.proc is not None and self.proc.poll() is None:
-                return False, "процесс уже запущен"
-            cmd = build_command(cfg)
-            binary = cmd[0]
-            resolved = binary if os.path.sep in binary else shutil.which(binary)
-            if not resolved or not os.path.exists(resolved):
-                return False, "ffmpeg не найден: {}".format(binary)
-            cmd[0] = resolved
-            self.manual_stop = False
-            kwargs = {}
-            if sys.platform.startswith("win"):
-                kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            try:
-                self.proc = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                    text=True, encoding="utf-8", errors="replace", bufsize=1,
-                    **kwargs
-                )
-            except OSError as exc:
-                self.proc = None
-                return False, "не удалось запустить: {}".format(exc)
-            self._run_cfg = copy.deepcopy(cfg)
-            self.started_at = time.time()
-            proc = self.proc
-
-        self.log("[panel] запущен FFmpeg, PID {}:".format(proc.pid))
-        self.log("[panel]   " + " ".join(masked_command(cmd)))
-        threading.Thread(target=self._reader, args=(proc,), daemon=True).start()
-        self._start_metadata_relay(cfg)
-        return True, "запущен (PID {})".format(proc.pid)
-
-    def stop(self):
-        with self.lock:
-            self.manual_stop = True
-            proc = self.proc
-        if proc is None or proc.poll() is not None:
-            self._stop_metadata_relay()
-            return False, "процесс не запущен"
-        self.log("[panel] остановка, PID {}...".format(proc.pid))
-        try:
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=5)
-        except OSError:
-            pass
-        self._stop_metadata_relay()
-        self.log("[panel] остановлен")
-        return True, "остановлен"
-
-    def restart(self, cfg=None):
-        was_running = False
-        with self.lock:
-            was_running = self.proc is not None and self.proc.poll() is None
-            next_cfg = copy.deepcopy(cfg if cfg is not None else self._run_cfg)
-        if was_running:
-            self.stop()
-            time.sleep(0.5)
-        if next_cfg is None:
-            return False, "нет конфигурации станции"
-        ok, msg = self.start(next_cfg)
-        return ok, ("перезапущен" if ok else msg)
-
-    # -------------------------------------------------------------- status
-
-    def status(self, current_cfg=None):
-        with self.lock:
-            running = self.proc is not None and self.proc.poll() is None
-            pid = self.proc.pid if running else None
-            uptime = int(time.time() - self.started_at) if (running and self.started_at) else 0
-            restarts = self.restarts
-            last_exit = self.last_exit
-        path, version = self.ffmpeg_info(current_cfg)
-        return {
-            "station_id": self.station_id,
-            "running": running,
-            "pid": pid,
-            "uptime": uptime,
-            "restarts": restarts,
-            "last_exit": last_exit,
-            "engine": "ffmpeg",
-            "detail": version or "FFmpeg",
-            "ffmpeg_found": path is not None,
-            "ffmpeg_version": version,
-            # FFmpeg завершается при обрыве/отказе подключения к Icecast:
-            # работающий процесс — признак установленного подключения
-            "icecast_connected": True if running else None,
-            # и по входу: фатальный обрыв источника завершает процесс
-            "input_connected": True if running else None,
-        }
-
-    def ffmpeg_info(self, cfg=None):
-        now = time.time()
-        binary = ((cfg or {}).get("ffmpeg_path") or "").strip()
-        cache_key = binary or "ffmpeg"
-        ts, path, version = self._ffmpeg_cache
-        if now - ts < 15 and (path == cache_key or path is not None):
-            return path, version
-        path, version = find_ffmpeg(cfg or {"ffmpeg_path": binary})
-        self._ffmpeg_cache = (now, path, version)
-        return path, version
-
-    # ------------------------------------------------------------- threads
-
-    def _reader(self, proc):
-        try:
-            for line in proc.stderr:
-                self.log(_mask_line(line.rstrip("\r\n")))
-        except (OSError, ValueError):
-            pass
-        rc = proc.wait()
-        with self.lock:
-            if self.proc is proc:
-                self.last_exit = rc
-        self._stop_metadata_relay()
-        self.log("[panel] процесс завершился, код {}".format(rc))
-
-    def _watchdog(self):
-        while True:
-            time.sleep(1)
-            with self.lock:
-                proc = self.proc
-                manual = self.manual_stop
-                cfg = copy.deepcopy(self._run_cfg)
-            if proc is None or manual or cfg is None or proc.poll() is None:
-                continue
-            auto = cfg.get("autorestart", {})
-            if not auto.get("enabled"):
-                continue
-            delay = max(1, int(auto.get("delay", 5)))
-            self.log("[panel] автоперезапуск через {} с...".format(delay))
-            time.sleep(delay)
-            with self.lock:
-                if self.manual_stop or self.proc is not proc:
-                    continue
-            ok, msg = self.start(cfg)
-            if ok:
-                with self.lock:
-                    self.restarts += 1
-                self.log("[panel] автоперезапуск выполнен")
-            else:
-                self.log("[panel] автоперезапуск не удался: {}".format(msg))
-                time.sleep(5)
 
 
 def _fmt_telnet_float(value):
@@ -989,11 +565,11 @@ def _loopback_url_to_host_gateway(url):
 
 
 class DockerWorkerManager:
-    """Менеджер станции на движке Liquidsoap: один Docker-контейнер на станцию.
+    """Менеджер станции: один Docker-контейнер с Liquidsoap-воркером на станцию.
 
-    Тот же контракт, что у ProcessManager (start/stop/restart/status/logs),
-    чтобы маршруты API не замечали разницы движков. Метаданные ICY идут
-    сквозь Liquidsoap natively, отдельный MetadataRelay не нужен.
+    Контракт: start/stop/restart/status/logs (+ dispose для остановки фоновых
+    потоков). Метаданные ICY идут сквозь Liquidsoap natively — отдельный
+    релей не нужен.
     """
 
     def __init__(self, station_id):
@@ -1503,8 +1079,6 @@ class DockerWorkerManager:
             "last_exit": last_exit,
             "engine": "liquidsoap",
             "detail": "Liquidsoap worker · {}".format(WORKER_IMAGE),
-            "ffmpeg_found": False,
-            "ffmpeg_version": None,
             "container": self.container_name if container is not None else None,
             # живой флаг on_connect/on_disconnect выхода; None — неизвестно
             "icecast_connected": self.icecast_connected() if running else None,
@@ -1566,32 +1140,16 @@ class DockerWorkerManager:
                 time.sleep(5)
 
 
-MANAGER_CLASSES = {
-    "ffmpeg": ProcessManager,
-    "liquidsoap": DockerWorkerManager,
-}
-
-
 _managers_lock = threading.Lock()
 _managers = {}
 
 
 def get_manager(station_id):
-    """Возвращает изолированный менеджер станции под её движок запуска."""
-    station = get_station(station_id)
-    engine = (station or {}).get("engine") or "ffmpeg"
-    cls = MANAGER_CLASSES.get(engine, ProcessManager)
+    """Возвращает менеджер станции (единственный движок — Liquidsoap-воркер)."""
     with _managers_lock:
         manager = _managers.get(station_id)
-        if manager is not None and not isinstance(manager, cls):
-            # Движок станции сменился — старый менеджер выключаем.
-            try:
-                manager.dispose()
-            except AttributeError:
-                manager.stop()
-            manager = None
         if manager is None:
-            manager = cls(station_id)
+            manager = DockerWorkerManager(station_id)
             _managers[station_id] = manager
         return manager
 
@@ -1815,12 +1373,9 @@ def api_station_command(station_id):
     if isinstance(body, dict):
         station = _normalize_station(_deep_merge(copy.deepcopy(station), body))
     settings = load_streams()["settings"]
-    if station.get("engine") == "liquidsoap":
-        script = liq.generate_liq_script(
-            containerize_loopback(station_runtime_config(station, settings)))
-        return jsonify({"cmd": [], "text": liq.mask_liq_script(script, station)})
-    cmd = build_command(station_runtime_config(station, settings))
-    return jsonify({"cmd": masked_command(cmd), "text": " ".join(masked_command(cmd))})
+    script = liq.generate_liq_script(
+        containerize_loopback(station_runtime_config(station, settings)))
+    return jsonify({"cmd": [], "text": liq.mask_liq_script(script, station)})
 
 
 @app.route("/api/streams/<station_id>/adjust", methods=["POST"])
@@ -1883,12 +1438,6 @@ def api_station_adjust(station_id):
         return jsonify({"ok": False, "error":
                         "укажите gain_db и/или eq_gains и/или compressor и/или "
                         "limiter и/или sections"}), 400
-    if station.get("engine") != "liquidsoap":
-        return jsonify({
-            "ok": False,
-            "error": "живая подстройка доступна только для движка Liquidsoap — "
-                     "для FFmpeg изменения применяются при перезапуске",
-        }), 409
     manager = get_manager(station_id)
     message = []
     if gain_db is not None:
@@ -1951,12 +1500,6 @@ def api_station_bypass(station_id):
         return _station_not_found()
     body = request.get_json(silent=True) or {}
     enabled = bool(body.get("enabled"))
-    if station.get("engine") != "liquidsoap":
-        return jsonify({
-            "ok": False,
-            "error": "живой BYPASS доступен только для движка Liquidsoap — "
-                     "для FFmpeg он применяется при перезапуске",
-        }), 409
     ok, msg = get_manager(station_id).set_bypass(enabled)
     if not ok:
         return jsonify({"ok": False, "error": msg}), 409
@@ -1982,7 +1525,7 @@ def api_health():
             "id": station["id"],
             "name": station["name"],
             "enabled": station["enabled"],
-            "engine": station.get("engine") or "ffmpeg",
+            "engine": station.get("engine") or "liquidsoap",
             "running": status["running"],
             "pid": status["pid"],
             "uptime": status["uptime"],
@@ -2027,8 +1570,8 @@ def api_command():
         return jsonify({"ok": False, "error": "нет станций"}), 404
     if isinstance(body, dict):
         cfg = _deep_merge(copy.deepcopy(cfg), body)
-    cmd = build_command(cfg)
-    return jsonify({"cmd": masked_command(cmd), "text": " ".join(masked_command(cmd))})
+    script = liq.generate_liq_script(containerize_loopback(cfg))
+    return jsonify({"cmd": [], "text": liq.mask_liq_script(script, cfg)})
 
 
 @app.route("/api/start", methods=["POST"])
