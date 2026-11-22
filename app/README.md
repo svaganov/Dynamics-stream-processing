@@ -18,12 +18,15 @@
 > Быстрая установка с нуля — см. [Инструкция по установке](../Инструкция%20по%20установке.md) в корне репозитория.
 
 - **Docker** — Docker Desktop на Windows (с WSL2-backend) или Docker на Linux-хосте.
+  В контейнерном варианте это единственная зависимость хоста.
 - Образ воркера `audio-worker:2.4.2` собирается из `worker/Dockerfile`
-  (базовый образ `savonet/liquidsoap:v2.4.2`). Имя образа можно переопределить
+  (базовый образ `savonet/liquidsoap:v2.4.2`); в контейнерном варианте панель
+  собирает его сама при первом старте. Имя образа можно переопределить
   переменной окружения `WORKER_IMAGE`.
 - **FFmpeg** — нужен только для подслушки A/B (MP3-мониторинг в браузер);
-  full-сборка с https://www.gyan.dev/ffmpeg/builds/ или путь к `ffmpeg.exe`
-  в разделе «08 Служба». Для запуска панели на хосте — **Python 3.9+**.
+  в образе панели уже есть. При запуске панели на хосте — full-сборка
+  с https://www.gyan.dev/ffmpeg/builds/ или путь к `ffmpeg.exe`
+  в разделе «08 Служба», плюс **Python 3.9+**.
 - Панель оркестрирует воркеров через Docker API: при запуске в контейнере
   (`docker compose`) в него монтируется `docker.sock`; при запуске напрямую
   (`python app.py`) используется локальный демон Docker.
@@ -42,29 +45,32 @@ pip install -r requirements.txt
 python app.py
 ```
 
-**Вариант B — панель в контейнере (docker-compose):**
+**Вариант B — панель в контейнере (docker compose, рекомендуется):**
 
 ```bat
 docker compose up -d --build
 ```
 
-Поднимается контейнер панели (`audio-panel:2.0`, порт 8770) и собирается образ воркера.
-Сами воркеры compose не запускает — панель создаёт по одному контейнеру `audio-worker-<id>`
-на каждую станцию. Обработка всегда идёт через Liquidsoap-воркеров (единственный
-движок); FFmpeg на хосте используется только для подслушки A/B.
+Поднимается контейнер панели (`audio-panel:2.1`, порт 8770) — на чистой машине
+нужен только Docker. Образ воркера `audio-worker:2.4.2` панель собирает сама
+при старте (entrypoint через docker.sock; отключается `WORKER_AUTO_BUILD=0`).
+Сами воркеры compose не запускает — панель создаёт по одному контейнеру
+`audio-worker-<id>` на каждую станцию. Обработка всегда идёт через
+Liquidsoap-воркеров (единственный движок); FFmpeg внутри образа панели
+используется только для подслушки A/B.
 
-Два пути, о которых нужно знать при запуске панели в контейнере (оба закрыты
-в `docker-compose.yml`, на Linux-хосте с монтированием `data:/data` работает
-«из коробки»):
+Контейнерный режим (определяется по `/.dockerenv`) отличается от хостового:
 
-- **Bind source рантайм-скриптов.** Демон Docker резолвит bind source `.liq`
-  на хосте, а `/data/runtime` внутри контейнера панели ему не виден. Если пути
-  не совпадают, задайте `WORKER_BIND_ROOT` — хостовый путь того же каталога
-  (на Docker Desktop Windows — Windows-путь тома, см. пример в compose).
-- **Живая подстройка.** Telnet-порты воркеров публикуются на loopback хоста;
-  панель внутри контейнера достаёт их через `host.docker.internal`
-  (`extra_hosts: host-gateway` в compose, определение «внутри контейнера» —
-  по `/.dockerenv`).
+- **Общий named volume `panel-data`.** Реестр `streams.json` и рантайм-скрипты
+  `.liq` лежат на томе (`/data`); воркеры монтируют тот же том read-only.
+  Хостовые пути и `WORKER_BIND_ROOT` больше не нужны.
+- **Общая сеть `audiopanel_net`.** Telnet живой подстройки доступен панели
+  по имени контейнера воркера; порты воркеров на хост не публикуются.
+- **Loopback-адреса** (`127.0.0.1`/`localhost` в источнике и Icecast)
+  переписываются на `host.docker.internal` — и в скриптах воркеров, и в
+  подслушке A/B (`extra_hosts: host-gateway` в compose).
+- Монтирование `docker.sock` даёт панели root-права на хосте — осознанная
+  цена оркестрации без DinD (на SELinux-хостах добавьте `:z` к маунту).
 
 Для управления удалённым демоном Docker (Linux-хост в сети):
 
@@ -73,7 +79,8 @@ set DOCKER_HOST=tcp://remote-host:2376
 docker compose up -d --build
 ```
 
-или `docker compose -H tcp://remote-host:2376 up -d --build`.
+При удалённом демоне живая подстройка недоступна (сеть воркеров на другой
+машине) — изменения применяются перезапуском.
 
 ## Использование
 
@@ -288,9 +295,12 @@ POST /api/streams/<id>/bypass      {"enabled": true|false}
 | `HOST` / `PORT`      | адрес и порт панели (по умолчанию 127.0.0.1:8770)      |
 | `STREAMS_PATH`       | путь к `streams.json` (в compose — `/data/streams.json`) |
 | `LEGACY_CONFIG_PATH` | путь к старому `config.json` для миграции              |
-| `WORKER_RUNTIME_DIR` | каталог рантайм-скриптов `.liq` воркеров; путь должен быть виден демону Docker |
-| `WORKER_BIND_ROOT`   | хостовый путь того же каталога для bind source, когда панель в контейнере (иначе не нужен) |
+| `WORKER_RUNTIME_DIR` | каталог рантайм-скриптов `.liq` воркеров (в compose — `/data/runtime` на общем томе) |
+| `WORKER_NETWORK`     | общая docker-сеть панели и воркеров в контейнерном режиме (по умолчанию `audiopanel_net`) |
+| `WORKER_VOLUME`      | общий named volume данных в контейнерном режиме (по умолчанию `panel-data`) |
+| `WORKER_BIND_ROOT`   | (только старая схема bind-mount) хостовый путь рантайм-каталога для демона Docker |
 | `WORKER_IMAGE`       | образ воркера Liquidsoap (по умолчанию `audio-worker:2.4.2`) |
+| `WORKER_AUTO_BUILD`  | `0` — отключить автосборку образа воркера в entrypoint панели |
 | `DOCKER_HOST`        | удалённый демон Docker, напр. `tcp://host:2376`        |
 
 Основные маршруты:
@@ -319,7 +329,8 @@ Unit-тесты используют временный реестр и мок-�
 Песочница (end-to-end, требует Docker и локальный FFmpeg для синтетического источника):
 
 ```bat
-python tests\sandbox_liquidsoap.py     :: две станции на Liquidsoap-воркерах
+python tests\sandbox_liquidsoap.py       :: две станции на Liquidsoap-воркерах (хостовый режим)
+python tests\sandbox_containerized.py    :: панель в контейнере: том, сеть, telnet по имени
 ```
 
 Песочница поднимает синтетический AAC-источник, панель и фейковый Icecast и проверяет:
@@ -359,14 +370,16 @@ python tests\sandbox_liquidsoap.py     :: две станции на Liquidsoap-
 ```text
 app.py               — сервер Flask, реестр станций, DockerWorkerManager
 liq.py               — генератор .liq из модели станции (+ маскировка пароля)
+entrypoint.py        — точка входа контейнера панели: автосборка образа воркера
 static/index.html    — интерфейс панели
 static/app.js        — логика мультипоточного интерфейса
 streams.json         — реестр станций (создаётся автоматически)
 requirements.txt     — зависимости Python (flask, docker)
 run.bat              — запуск в Windows
-Dockerfile           — образ панели audio-panel:2.0
+Dockerfile           — образ панели audio-panel:2.1 (контекст сборки — корень репозитория)
 ../worker/Dockerfile — образ воркера audio-worker:2.4.2 (Liquidsoap)
-../docker-compose.yml— панель + сборка образа воркера
+../docker-compose.yml— панель + сеть audiopanel_net + том panel-data (воркеры создаются панелью)
 ../tests/test_app.py — автотесты реестра, API и изоляции воркеров
 ../tests/test_liq.py — автотесты генератора .liq
+../tests/test_entrypoint.py — автотесты автосборки образа воркера (мок Docker API)
 ```

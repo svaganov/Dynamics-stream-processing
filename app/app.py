@@ -45,9 +45,17 @@ WORKER_BIND_ROOT = os.environ.get("WORKER_BIND_ROOT", "")
 WORKER_IMAGE = os.environ.get("WORKER_IMAGE", "audio-worker:2.4.2")
 
 # Панель запущена внутри контейнера (Docker откладывает /.dockerenv, некоторые
-# рантаймы — /run/.containerenv): нужно для маршрутизации к хостовым портам
-# опубликованных воркеров (telnet живой подстройки) через host.docker.internal.
+# рантаймы — /run/.containerenv).
 _PANEL_INSIDE_CONTAINER = os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv")
+
+# Режим «панель в контейнере» (полная контейнеризация): воркеры создаются
+# в общей docker-сети WORKER_NETWORK (telnet панели — по имени контейнера,
+# порты на хост не публикуются), а рантайм-скрипты читают с общего named
+# volume WORKER_VOLUME, смонтированного панели в /data (воркеру — read-only).
+# На хостовом запуске (run.bat / python app.py) — прежняя схема: bind-mount
+# скрипта и telnet-порт на 127.0.0.1.
+WORKER_NETWORK = os.environ.get("WORKER_NETWORK", "audiopanel_net")
+WORKER_VOLUME = os.environ.get("WORKER_VOLUME", "panel-data")
 
 import importlib.util as _ilu
 
@@ -645,6 +653,13 @@ class DockerWorkerManager:
                 return container
         return None
 
+    def _ensure_network(self, client):
+        """Общая сеть панели и воркеров (режим «панель в контейнере»)."""
+        if client.networks.list(names=[WORKER_NETWORK]):
+            return
+        client.networks.create(WORKER_NETWORK, driver="bridge")
+        self.log("[panel] создана docker-сеть {}".format(WORKER_NETWORK))
+
     # ------------------------------------------------------------ control
 
     def start(self, cfg):
@@ -674,20 +689,39 @@ class DockerWorkerManager:
                 except Exception:
                     pass
             import docker
-            container = client.containers.create(
-                WORKER_IMAGE,
-                name=self.container_name,
-                command=["/station.liq"],
-                mounts=[docker.types.Mount(
-                    target="/station.liq", source=self._bind_source(script_path),
-                    type="bind", read_only=True,
-                )],
-                labels={"audio-panel": "1", "audio-panel.station": self.station_id},
-                extra_hosts={"host.docker.internal": "host-gateway"},
-                # Telnet-сервер управления: на хосте доступен только с 127.0.0.1
-                # на случайном порту — панель находит его через Docker API.
-                ports={"{}/tcp".format(liq.TELNET_PORT): ("127.0.0.1", None)},
-            )
+            if _PANEL_INSIDE_CONTAINER:
+                # Полная контейнеризация: скрипт воркер читает с общего named
+                # volume (тот же том, что смонтирован панели в каталог данных),
+                # telnet живой подстройки — по имени контейнера в общей сети,
+                # порты на хост не публикуются.
+                self._ensure_network(client)
+                container = client.containers.create(
+                    WORKER_IMAGE,
+                    name=self.container_name,
+                    command=[script_path],
+                    mounts=[docker.types.Mount(
+                        target=os.path.dirname(RUNTIME_DIR), source=WORKER_VOLUME,
+                        type="volume", read_only=True,
+                    )],
+                    labels={"audio-panel": "1", "audio-panel.station": self.station_id},
+                    extra_hosts={"host.docker.internal": "host-gateway"},
+                    network=WORKER_NETWORK,
+                )
+            else:
+                container = client.containers.create(
+                    WORKER_IMAGE,
+                    name=self.container_name,
+                    command=["/station.liq"],
+                    mounts=[docker.types.Mount(
+                        target="/station.liq", source=self._bind_source(script_path),
+                        type="bind", read_only=True,
+                    )],
+                    labels={"audio-panel": "1", "audio-panel.station": self.station_id},
+                    extra_hosts={"host.docker.internal": "host-gateway"},
+                    # Telnet-сервер управления: на хосте доступен только с 127.0.0.1
+                    # на случайном порту — панель находит его через Docker API.
+                    ports={"{}/tcp".format(liq.TELNET_PORT): ("127.0.0.1", None)},
+                )
             container.start()
         except Exception as exc:
             return False, "не удалось запустить воркер: {}".format(exc)
@@ -735,7 +769,16 @@ class DockerWorkerManager:
         return ok, ("перезапущен" if ok else msg)
 
     def telnet_host_port(self):
-        """(host, port) опубликованного на хосте telnet-порта воркера или None."""
+        """(host, port) telnet-порта воркера для живой подстройки или None."""
+        if _PANEL_INSIDE_CONTAINER and not os.environ.get("DOCKER_HOST"):
+            # Общая сеть: telnet воркера доступен по имени контейнера,
+            # порт на хост не публикуется. (С удалённым DOCKER_HOST сеть
+            # чужая — живьём не достичь, как и раньше.)
+            with self.lock:
+                container = self.container
+            if container is None or not self._is_running(container):
+                return None
+            return self.container_name, liq.TELNET_PORT
         if os.environ.get("DOCKER_HOST"):
             # порт мапится на удалённом хосте — из панели живьём не достичь
             return None
@@ -1653,14 +1696,23 @@ def _listen_response(cfg, which, station_id=None):
         host = str(ice["host"])
         # Имя хоста из Docker-контура (host.docker.internal и т.п.) с хоста
         # панели недоступно: Icecast публикуется на loopback — слушаем его.
-        if host.lower() in ("host.docker.internal", "host.containers.internal",
-                            "gateway.docker.internal"):
+        if not _PANEL_INSIDE_CONTAINER and host.lower() in (
+                "host.docker.internal", "host.containers.internal",
+                "gateway.docker.internal"):
             host = "127.0.0.1"
+        # Панель в контейнере: loopback в конфиге — это loopback контейнера,
+        # а сервер на той же машине достижим через host.docker.internal
+        # (воркерам панель делает ту же подстановку в containerize_loopback).
+        if _PANEL_INSIDE_CONTAINER and host.lower() in LOOPBACK_HOSTS:
+            host = "host.docker.internal"
         url = "http://{}:{}/{}".format(
             host, ice["port"], str(ice["mount"]).lstrip("/"))
         reconnect, delay_max = False, 5
     else:
         return jsonify({"ok": False, "error": "unknown stream"}), 404
+
+    if _PANEL_INSIDE_CONTAINER:
+        url = _loopback_url_to_host_gateway(url)
 
     cmd = [_ffmpeg_binary(cfg), "-hide_banner", "-loglevel", "error"]
     if reconnect:

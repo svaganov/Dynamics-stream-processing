@@ -38,6 +38,9 @@ class FakeProc:
         self.finished = False
         self.terminated = False
         self.stderr = FakeStderr(self)
+        # Подслушка читает proc.stdout: пустой поток = конец мониторинга.
+        import io
+        self.stdout = io.BytesIO(b"")
 
     def __enter__(self):
         return self
@@ -100,6 +103,7 @@ class FakeWorkerContainer:
         self.status = "created"
         self.stopped = False
         self.removed = False
+        self.create_kwargs = {}
         self.attrs = {
             "NetworkSettings": {"Ports": {}},
             "State": {"Pid": None, "StartedAt": "", "ExitCode": None},
@@ -147,13 +151,27 @@ class FakeDockerContainers:
 
     def create(self, image, name=None, **kwargs):
         container = FakeWorkerContainer(name, 1000 + len(self.created))
+        container.create_kwargs = kwargs
         self.created.append(container)
         return container
+
+
+class FakeDockerNetworks:
+    def __init__(self):
+        self.created = []
+
+    def list(self, names=None):
+        return [n for n in self.created if not names or n in names]
+
+    def create(self, name, driver="bridge"):
+        self.created.append(name)
+        return name
 
 
 class FakeDockerClient:
     def __init__(self):
         self.containers = FakeDockerContainers()
+        self.networks = FakeDockerNetworks()
 
 
 class PanelApiTest(unittest.TestCase):
@@ -597,6 +615,43 @@ class PanelApiTest(unittest.TestCase):
         finally:
             panel.stop_listeners("station-1")
 
+    def test_listen_loopback_rewrite_in_container_mode(self):
+        # Панель в контейнере: loopback-адреса источника и Icecast в подслушке
+        # указывают на loopback контейнера — переписываются на
+        # host.docker.internal, как в скриптах воркеров.
+        self.client.put("/api/streams/station-1", json={
+            "icecast": {"host": "127.0.0.1", "port": 8800, "mount": "/out.aacp"},
+        })
+        popen_patch, calls, procs = self.make_fake_popen()
+        with popen_patch, mock.patch.object(panel, "_PANEL_INSIDE_CONTAINER", True):
+            res = self.client.get("/api/streams/station-1/listen/output")
+            self.assertEqual(res.status_code, 200)
+            self.assertIn("http://host.docker.internal:8800/out.aacp", calls[-1])
+            res.close()
+            res = self.client.get("/api/streams/station-1/listen/input")
+            self.assertEqual(res.status_code, 200)
+            self.assertIn("http://host.docker.internal:8000/input", calls[-1])
+            res.close()
+        for proc in procs:
+            proc.kill()
+        panel.stop_listeners("station-1")
+
+    def test_listen_host_gateway_rewrite_on_host_panel(self):
+        # Панель на хосте: host.docker.internal из конфига недоступен —
+        # слушаем loopback (прежнее поведение сохранено).
+        self.client.put("/api/streams/station-1", json={
+            "icecast": {"host": "host.docker.internal", "port": 8800, "mount": "/out.aacp"},
+        })
+        popen_patch, calls, procs = self.make_fake_popen()
+        with popen_patch, mock.patch.object(panel, "_PANEL_INSIDE_CONTAINER", False):
+            res = self.client.get("/api/streams/station-1/listen/output")
+            self.assertEqual(res.status_code, 200)
+            self.assertIn("http://127.0.0.1:8800/out.aacp", calls[-1])
+            res.close()
+        for proc in procs:
+            proc.kill()
+        panel.stop_listeners("station-1")
+
     def test_bind_source_mapping_for_containerized_panel(self):        # Панель в контейнере: bind source резолвится демоном на хосте, поэтому
         # WORKER_BIND_ROOT переносит относительный путь скрипта на хостовый корень.
         with mock.patch.object(panel, "WORKER_BIND_ROOT",
@@ -800,6 +855,52 @@ class PanelApiTest(unittest.TestCase):
         self.assertIn("последнюю", res.get_json()["error"])
         data = self.client.get("/api/streams").get_json()
         self.assertEqual([s["id"] for s in data["streams"]], ["station-1"])
+
+    def test_container_mode_uses_volume_and_network(self):
+        # Режим «панель в контейнере»: воркер в общей сети, скрипт с named
+        # volume (read-only), порты на хост не публикуются.
+        popen_patch, client = self.make_fake_docker()
+        with popen_patch, \
+             mock.patch.object(panel, "_PANEL_INSIDE_CONTAINER", True), \
+             mock.patch.object(panel, "WORKER_NETWORK", "audiopanel_net"), \
+             mock.patch.object(panel, "WORKER_VOLUME", "panel-data"):
+            res = self.client.post("/api/streams/station-1/start")
+            self.assertTrue(res.get_json()["ok"], res.get_json())
+            self.assertEqual(client.networks.created, ["audiopanel_net"])
+            container = client.containers.created[0]
+            kwargs = container.create_kwargs
+            self.assertEqual(kwargs.get("network"), "audiopanel_net")
+            self.assertNotIn("ports", kwargs)
+            mounts = kwargs.get("mounts") or []
+            self.assertEqual(len(mounts), 1)
+            self.assertEqual(mounts[0]["Type"], "volume")
+            self.assertEqual(mounts[0]["Source"], "panel-data")
+            self.assertTrue(mounts[0]["ReadOnly"])
+            # Команда — путь скрипта на общем томе (как его видит панель).
+            self.assertEqual(len(kwargs.get("command")), 1)
+            self.assertTrue(kwargs["command"][0].endswith("station.liq"))
+            # Telnet живой подстройки — по имени контейнера в общей сети.
+            manager = panel.get_manager("station-1")
+            self.assertEqual(manager.telnet_host_port(),
+                             ("audio-worker-station-1", panel.liq.TELNET_PORT))
+
+    def test_host_mode_uses_bind_mount_and_published_port(self):
+        # Хостовый режим (панель не в контейнере) — прежняя схема: bind-mount
+        # скрипта и telnet-порт на 127.0.0.1.
+        popen_patch, client = self.make_fake_docker()
+        with popen_patch, \
+             mock.patch.object(panel, "_PANEL_INSIDE_CONTAINER", False):
+            res = self.client.post("/api/streams/station-1/start")
+            self.assertTrue(res.get_json()["ok"], res.get_json())
+            self.assertEqual(client.networks.created, [])
+            container = client.containers.created[0]
+            kwargs = container.create_kwargs
+            self.assertNotIn("network", kwargs)
+            self.assertIn("ports", kwargs)
+            mounts = kwargs.get("mounts") or []
+            self.assertEqual(mounts[0]["Type"], "bind")
+            self.assertEqual(mounts[0]["Target"], "/station.liq")
+            self.assertEqual(kwargs.get("command"), ["/station.liq"])
 
 
 if __name__ == "__main__":

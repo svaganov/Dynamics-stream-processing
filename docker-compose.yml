@@ -1,31 +1,40 @@
-# Топология Этапа 2: 1 контейнер панели (control plane) + N контейнеров-воркеров
-# Liquidsoap, которые панель создаёт и уничтожает динамически через Docker API.
-# Воркеры открытых портов не имеют: тянут источники снаружи и пушат на Icecast.
+# Полная контейнеризация: 1 контейнер панели (control plane) + N контейнеров-
+# воркеров Liquidsoap, которые панель создаёт и уничтожает динамически через
+# Docker API. Воркеры — в общей сети audiopanel_net, читают свои .liq с общего
+# тома panel-data (read-only), telnet живой подстройки — по имени контейнера,
+# порты на хост не публикуются. Наружу смотрит только порт панели 8770.
 #
-# Запуск:  docker compose up -d --build
+# Чистая машина = только Docker. Запуск:
+#   docker compose up -d --build
 # Панель:  http://127.0.0.1:8770
 #
-# Подключение к удалённому демену Docker (Linux-хост в сети):
-#   docker compose -H tcp://remote-host:2376 up -d --build
-# или через переменную окружения DOCKER_HOST=tcp://remote-host:2376.
+# Образ воркера (audio-worker:2.4.2) собирать вручную НЕ нужно: entrypoint
+# панели проверяет его наличие и собирает через docker.sock из зашитого
+# контекста (отключается WORKER_AUTO_BUILD=0).
+#
+# ВНИМАНИЕ: монтирование docker.sock даёт панели root-права на хосте —
+# это осознанная цена оркестрации без DinD. На SELinux-хостах (RHEL/Fedora)
+# добавьте :z к маунту sock.
 
 services:
-  # Control plane: реестр станций, жизненный цикл воркеров, UI.
+  # Control plane: реестр станций, жизненный цикл воркеров, UI, подслушка A/B.
   panel:
-    build: ./app
-    image: audio-panel:2.0
+    build:
+      context: .            # корень репозитория: нужен worker/ для автосборки
+      dockerfile: app/Dockerfile
+    image: audio-panel:2.1
     ports:
       - "8770:8770"
     volumes:
-      # Доступ демона Docker: панель оркестрирует воркеров через API.
+      # Доступ к демону Docker: панель оркестрирует воркеров через API.
       - /var/run/docker.sock:/var/run/docker.sock
-      # Реестр станций + runtime .liq воркеров (пути bind-mount'ов должны
-      # быть видны демону Docker, поэтому это хостовый том).
-      - ./data:/data
-    # Панель внутри контейнера достаёт опубликованные на хосте telnet-порты
-    # воркеров (живая подстройка) через host.docker.internal (см. app.py:
-    # _PANEL_INSIDE_CONTAINER). На Linux-хосте с нативным docker это имя
-    # можно не задавать — панель тогда обычно работает на хосте.
+      # Реестр станций + runtime .liq воркеров: общий named volume, воркеры
+      # монтируют его же read-only — хостовые пути больше не нужны вовсе.
+      - panel-data:/data
+    networks:
+      - audiopanel_net
+    # Источники/Icecast на этой же машине: loopback-адреса из конфига
+    # переписываются на host.docker.internal (и воркерам, и подслушке).
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
@@ -33,19 +42,18 @@ services:
       PORT: 8770
       STREAMS_PATH: /data/streams.json
       WORKER_RUNTIME_DIR: /data/runtime
-      # Хостовый путь того же рантайм-каталога: демон резолвит bind source
-      # воркеров на хосте, а /data/runtime внутри контейнера ему не виден.
-      # На Linux-хосте с этим же монтированием совпадает сам — не нужен.
-      # На Docker Desktop Windows укажите Windows-путь тома, напр.:
-      # WORKER_BIND_ROOT: "D:\\GitHub_Projects\\Dynamics-stream-processing\\data\\runtime"
-      # Для удалённого демона задайте здесь или снаружи:
-      # DOCKER_HOST: tcp://remote-host:2376
       WORKER_IMAGE: audio-worker:2.4.2
+      WORKER_NETWORK: audiopanel_net
+      WORKER_VOLUME: panel-data
+      # WORKER_AUTO_BUILD: "0"   # отключить автосборку образа воркера
+      # Для удалённого демона задайте снаружи:
+      # DOCKER_HOST: tcp://remote-host:2376
     restart: unless-stopped
 
-  # Образ воркера собирается здесь же; сервис не запускается — контейнеры
-  # воркеров панель создаёт по одному на станцию (имена audio-worker-<id>).
-  worker:
-    build: ./worker
-    image: audio-worker:2.4.2
-    profiles: ["tools"]   # не стартует при обычном up; нужен только для сборки
+networks:
+  audiopanel_net:
+    name: audiopanel_net
+
+volumes:
+  panel-data:
+    name: panel-data

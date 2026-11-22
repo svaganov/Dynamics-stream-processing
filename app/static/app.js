@@ -359,8 +359,8 @@ function syncChain() {
     return;
   }
   const steps = [
-    { name: "EQ", on: cfg.equalizer.enabled && cfg.equalizer.gains.some((g) => g !== 0) },
-    { name: "GAIN", on: cfg.gain.enabled && parseFloat(cfg.gain.db) !== 0 },
+    { name: "EQ", on: cfg.equalizer.enabled },
+    { name: "GAIN", on: cfg.gain.enabled },
     { name: "COMP", on: cfg.compressor.enabled },
     { name: "LUFS", on: cfg.loudnorm.enabled },
     { name: "LIM", on: cfg.limiter.enabled },
@@ -514,8 +514,8 @@ function chainStepsOf(cfg) {
   const eq = cfg.equalizer || {}, gain = cfg.gain || {}, comp = cfg.compressor || {};
   const ln = cfg.loudnorm || {}, lim = cfg.limiter || {};
   return [
-    { name: "EQ", on: eq.enabled && (eq.gains || []).some((g) => g !== 0) },
-    { name: "GAIN", on: gain.enabled && parseFloat(gain.db) !== 0 },
+    { name: "EQ", on: Boolean(eq.enabled) },
+    { name: "GAIN", on: Boolean(gain.enabled) },
     { name: "COMP", on: Boolean(comp.enabled) },
     { name: "LUFS", on: Boolean(ln.enabled) },
     { name: "LIM", on: Boolean(lim.enabled) },
