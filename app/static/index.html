@@ -857,8 +857,8 @@
             <label>Задержка перезапуска, с <span class="val" id="ar_delay_val"></span></label>
             <input type="range" id="ar_delay" min="1" max="60" step="1">
           </div>
-          <div class="field">
-            <label>Путь к ffmpeg (пусто = из PATH)</label>
+          <div class="field" id="ffmpegPathField" style="display:none">
+            <label>FFmpeg не найден — укажите путь к ffmpeg.exe (нужен только для подслушки A/B)</label>
             <input type="text" id="ffmpeg_path" placeholder="C:\ffmpeg\bin\ffmpeg.exe" spellcheck="false">
           </div>
           <div class="field">

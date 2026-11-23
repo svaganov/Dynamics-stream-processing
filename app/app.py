@@ -1296,6 +1296,12 @@ def api_streams_list():
 @app.route("/api/streams", methods=["POST"])
 def api_stream_create():
     body = request.get_json(silent=True)
+    if body is None and request.data:
+        # Тело есть, но это не JSON (например, клиент забыл
+        # Content-Type: application/json): молча создать дефолтную станцию
+        # вместо заданной — ловушка, лучше явная ошибка.
+        return jsonify({"ok": False,
+                        "error": "некорректный JSON в теле запроса"}), 400
     try:
         station = create_station(body or {})
     except ValueError as exc:
@@ -1315,6 +1321,9 @@ def api_stream_get(station_id):
 @app.route("/api/streams/<station_id>", methods=["PUT"])
 def api_stream_update(station_id):
     body = request.get_json(silent=True)
+    if body is None and request.data:
+        return jsonify({"ok": False,
+                        "error": "некорректный JSON в теле запроса"}), 400
     try:
         station = update_station(station_id, body or {})
     except KeyError:
@@ -1579,7 +1588,13 @@ def api_health():
             "icecast_connected": status.get("icecast_connected"),
             "input_connected": status.get("input_connected"),
         })
-    return jsonify({"ok": True, "counts": counts, "stations": stations})
+    return jsonify({"ok": True, "counts": counts, "stations": stations,
+                    # панель в контейнере: ffmpeg встроен в образ, поле
+                    # «путь к FFmpeg» в UI бессмысленно — скрываем
+                    "containerized": _PANEL_INSIDE_CONTAINER,
+                    # ffmpeg нужен только подслушке A/B и только на хосте;
+                    # поле пути в UI показываем, лишь когда бинарь не найден
+                    "ffmpeg_available": _ffmpeg_available(doc["settings"])})
 
 
 # ----------------------------- compatibility API for the single-station UI ---
@@ -1683,6 +1698,14 @@ def _ffmpeg_binary(cfg):
     if os.path.sep in binary or (os.path.altsep and os.path.altsep in binary):
         return binary
     return shutil.which(binary) or binary
+
+
+def _ffmpeg_available(settings):
+    """FFmpeg для подслушки доступен: задан существующий путь или есть в PATH."""
+    binary = (settings.get("ffmpeg_path") or "").strip()
+    if binary:
+        return os.path.exists(binary)
+    return shutil.which("ffmpeg") is not None
 
 
 def _listen_response(cfg, which, station_id=None):

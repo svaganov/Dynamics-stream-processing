@@ -1258,6 +1258,11 @@ async function pollHealth() {
   try {
     lastHealth = await (await fetch("/api/health")).json();
     healthById = new Map(lastHealth.stations.map((s) => [s.id, s]));
+    // Поле пути к ffmpeg показываем, только когда он не найден и панель
+    // на хосте (в контейнере ffmpeg встроен в образ).
+    const fpf = $("ffmpegPathField");
+    if (fpf) fpf.style.display =
+      (lastHealth.containerized || lastHealth.ffmpeg_available) ? "none" : "";
     const counts = lastHealth.counts;
     const summary = counts.running + " работает · " + counts.stopped + " остановлено";
     $("rpSummary").textContent = summary;

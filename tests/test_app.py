@@ -248,6 +248,24 @@ class PanelApiTest(unittest.TestCase):
 
         self.assertEqual(self.client.delete("/api/streams/missing").status_code, 404)
 
+    def test_non_json_body_rejected_not_silently_defaulted(self):
+        # Тело без Content-Type: application/json раньше молча превращалось
+        # в дефолтную станцию — конфиг клиента терялся. Теперь — явная 400.
+        res = self.client.post("/api/streams", data='{"id": "cloud-1"}',
+                               content_type="text/plain")
+        self.assertEqual(res.status_code, 400)
+        data = self.client.get("/api/streams").get_json()
+        self.assertEqual([s["id"] for s in data["streams"]], ["station-1"])
+
+        res = self.client.put("/api/streams/station-1", data='{"name": "X"}',
+                              content_type="text/plain")
+        self.assertEqual(res.status_code, 400)
+
+        # Пустое тело по-прежнему допустимо: UI «+ Поток» создаёт дефолтную станцию.
+        res = self.client.post("/api/streams")
+        self.assertEqual(res.status_code, 201)
+        self.assertEqual(res.get_json()["station"]["id"], "station-2")
+
     def test_legacy_config_migrates_to_station_one(self):
         legacy = {
             "source": {"url": "http://127.0.0.1:8000/input", "reconnect": True, "reconnect_delay_max": 7},
@@ -848,6 +866,25 @@ class PanelApiTest(unittest.TestCase):
         data = self.client.get("/api/streams").get_json()
         self.assertEqual([s["id"] for s in data["streams"]], [station2_id])
         self.assertNotIn("station-1", panel._managers)
+
+    def test_health_exposes_containerized_flag(self):
+        with mock.patch.object(panel, "_PANEL_INSIDE_CONTAINER", False):
+            res = self.client.get("/api/health").get_json()
+            self.assertFalse(res["containerized"])
+        with mock.patch.object(panel, "_PANEL_INSIDE_CONTAINER", True):
+            res = self.client.get("/api/health").get_json()
+            self.assertTrue(res["containerized"])
+
+    def test_health_ffmpeg_available(self):
+        # Путь задан и существует — ffmpeg доступен, поле в UI скрывается.
+        self.client.put("/api/settings", json={"ffmpeg_path": str(self.fake_ffmpeg)})
+        res = self.client.get("/api/health").get_json()
+        self.assertTrue(res["ffmpeg_available"])
+        # Путь задан, но не существует — недоступен, поле показывается.
+        self.client.put("/api/settings",
+                        json={"ffmpeg_path": str(self.tmp_path / "nope.exe")})
+        res = self.client.get("/api/health").get_json()
+        self.assertFalse(res["ffmpeg_available"])
 
     def test_delete_last_station_is_rejected(self):
         res = self.client.delete("/api/streams/station-1")
