@@ -116,6 +116,16 @@ function currentEqGains() {
   return EQ_FREQS.map((_, i) => parseFloat($("eq_b" + i).value));
 }
 
+/* Ответ /adjust несёт обновлённые секции станции — сливаем их в streamsDoc,
+   чтобы карточки дашборда (чипы цепочки) не показывали устаревшее состояние. */
+function applyAdjustToDoc(data) {
+  const st = streamsDoc.streams.find((s) => s.id === currentStationId);
+  if (!st) return;
+  for (const key of ["gain", "equalizer", "compressor", "limiter", "loudnorm"]) {
+    if (data[key]) st[key] = data[key];
+  }
+}
+
 /* Живое применение EQ: для работающей Liquidsoap-станции отпускание слайдера,
    пресет, сброс и включение EQ шлют все 10 полос воркеру по telnet. */
 async function applyEqLive() {
@@ -136,6 +146,7 @@ async function applyEqLive() {
     }
     const st = streamsDoc.streams.find((s) => s.id === currentStationId);
     if (st) st.equalizer = Object.assign({}, st.equalizer, { enabled: true, gains });
+    applyAdjustToDoc(data);
     toast("EQ применён живьём");
     return true;
   } catch (e) {
@@ -1119,6 +1130,7 @@ $("btnGainLive").addEventListener("click", async () => {
     toast(data.ok
       ? "Применено живьём: " + (db > 0 ? "+" : "") + db + " dB"
       : (data.error || "Не удалось подстроить"), !data.ok);
+    if (data.ok) applyAdjustToDoc(data);
   } catch (e) {
     toast("Не удалось подстроить", true);
   }
@@ -1140,7 +1152,11 @@ $("gain_db").addEventListener("input", () => {
         body: JSON.stringify({ gain_db: db }),
       });
       const data = await res.json();
-      if (!data.ok) toast(data.error || "Не удалось подстроить gain", true);
+      if (!data.ok) {
+        toast(data.error || "Не удалось подстроить gain", true);
+      } else {
+        applyAdjustToDoc(data);
+      }
     } catch (e) {
       toast("Не удалось подстроить gain", true);
     }
@@ -1182,7 +1198,11 @@ function scheduleDynLive() {
         body: JSON.stringify(body),
       });
       const data = await res.json();
-      if (!data.ok) toast(data.error || "Не удалось подстроить динамику", true);
+      if (!data.ok) {
+        toast(data.error || "Не удалось подстроить динамику", true);
+      } else {
+        applyAdjustToDoc(data);
+      }
     } catch (e) {
       toast("Не удалось подстроить динамику", true);
     }
@@ -1219,6 +1239,7 @@ for (const [checkboxId, section] of Object.entries(SECTION_BY_CHECKBOX)) {
       });
       const data = await res.json();
       toast(data.ok ? data.message : (data.error || "Не удалось переключить секцию"), !data.ok);
+      if (data.ok) applyAdjustToDoc(data);
     } catch (e) {
       toast("Не удалось переключить секцию", true);
     }
