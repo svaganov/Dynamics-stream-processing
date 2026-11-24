@@ -1113,6 +1113,11 @@ class DockerWorkerManager:
                     pid = None
             except Exception:
                 running = False
+        if running:
+            icecast_connected = self.icecast_connected()
+            input_connected = self.input_connected()
+        else:
+            icecast_connected = input_connected = None
         return {
             "station_id": self.station_id,
             "running": running,
@@ -1124,9 +1129,9 @@ class DockerWorkerManager:
             "detail": "Liquidsoap worker · {}".format(WORKER_IMAGE),
             "container": self.container_name if container is not None else None,
             # живой флаг on_connect/on_disconnect выхода; None — неизвестно
-            "icecast_connected": self.icecast_connected() if running else None,
+            "icecast_connected": icecast_connected,
             # input.status источника: connected <url> ↔ прочее; None — неизвестно
-            "input_connected": self.input_connected() if running else None,
+            "input_connected": input_connected,
         }
 
     # ------------------------------------------------------------- threads
@@ -1708,34 +1713,42 @@ def _ffmpeg_available(settings):
     return shutil.which("ffmpeg") is not None
 
 
+def _output_stream_url(cfg):
+    """URL выходного потока станции для чтения с машины панели
+    (используется A/B-прослушкой выхода и LUFS-метром)."""
+    ice = cfg["icecast"]
+    host = str(ice["host"])
+    # Имя хоста из Docker-контура (host.docker.internal и т.п.) с хоста
+    # панели недоступно: Icecast публикуется на loopback — слушаем его.
+    if not _PANEL_INSIDE_CONTAINER and host.lower() in (
+            "host.docker.internal", "host.containers.internal",
+            "gateway.docker.internal"):
+        host = "127.0.0.1"
+    # Панель в контейнере: loopback в конфиге — это loopback контейнера,
+    # а сервер на той же машине достижим через host.docker.internal
+    # (воркерам панель делает ту же подстановку в containerize_loopback).
+    if _PANEL_INSIDE_CONTAINER and host.lower() in LOOPBACK_HOSTS:
+        host = "host.docker.internal"
+    url = "http://{}:{}/{}".format(
+        host, ice["port"], str(ice["mount"]).lstrip("/"))
+    if _PANEL_INSIDE_CONTAINER:
+        url = _loopback_url_to_host_gateway(url)
+    return url
+
+
 def _listen_response(cfg, which, station_id=None):
     """Мониторинговый MP3-поток для прослушки в браузере (A/B вход/выход)."""
     if which == "input":
         url = cfg["source"]["url"]
         reconnect = cfg["source"].get("reconnect")
         delay_max = cfg["source"].get("reconnect_delay_max", 5)
+        if _PANEL_INSIDE_CONTAINER:
+            url = _loopback_url_to_host_gateway(url)
     elif which == "output":
-        ice = cfg["icecast"]
-        host = str(ice["host"])
-        # Имя хоста из Docker-контура (host.docker.internal и т.п.) с хоста
-        # панели недоступно: Icecast публикуется на loopback — слушаем его.
-        if not _PANEL_INSIDE_CONTAINER and host.lower() in (
-                "host.docker.internal", "host.containers.internal",
-                "gateway.docker.internal"):
-            host = "127.0.0.1"
-        # Панель в контейнере: loopback в конфиге — это loopback контейнера,
-        # а сервер на той же машине достижим через host.docker.internal
-        # (воркерам панель делает ту же подстановку в containerize_loopback).
-        if _PANEL_INSIDE_CONTAINER and host.lower() in LOOPBACK_HOSTS:
-            host = "host.docker.internal"
-        url = "http://{}:{}/{}".format(
-            host, ice["port"], str(ice["mount"]).lstrip("/"))
+        url = _output_stream_url(cfg)
         reconnect, delay_max = False, 5
     else:
         return jsonify({"ok": False, "error": "unknown stream"}), 404
-
-    if _PANEL_INSIDE_CONTAINER:
-        url = _loopback_url_to_host_gateway(url)
 
     cmd = [_ffmpeg_binary(cfg), "-hide_banner", "-loglevel", "error"]
     if reconnect:
