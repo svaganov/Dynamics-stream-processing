@@ -544,7 +544,12 @@ $("outputsList").addEventListener("click", (e) => {
     toast("Должен остаться хотя бы один выход", true);
     return;
   }
-  outputsState.splice(Number(del.closest(".output-card").dataset.idx), 1);
+  const idx = Number(del.closest(".output-card").dataset.idx);
+  const out = outputsState[idx];
+  // защита «от дурака»: удаление только после явного подтверждения
+  if (!confirm("Удалить выход «" + outTitleText(out, idx) + "»?\n" +
+               "Изменение применится при перезапуске станции.")) return;
+  outputsState.splice(idx, 1);
   renderOutputsEditor($("monitor_output").value);
   refreshCommand();
 });
