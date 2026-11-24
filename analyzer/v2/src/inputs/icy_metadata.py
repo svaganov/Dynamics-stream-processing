@@ -11,6 +11,7 @@ are delayed or not emitted for a particular stream.
 """
 
 import asyncio
+import html
 import re
 from typing import Callable, Optional
 from urllib.parse import urlparse
@@ -55,7 +56,8 @@ class ICYMetadataReader:
         m = re.search(r"StreamTitle='([^']*)'", meta_text)
         if not m:
             return None
-        title = m.group(1).strip()
+        # Icecast 2.4 экранирует не-latin1 символы HTML-сущностями (&#1050;...)
+        title = html.unescape(m.group(1)).strip()
         if not title:
             return None
         if " - " in title:

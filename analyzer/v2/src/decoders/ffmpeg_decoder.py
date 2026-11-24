@@ -5,6 +5,7 @@ Outputs numpy arrays via async callback.
 """
 
 import asyncio
+import html
 import re
 import time
 import numpy as np
@@ -319,7 +320,8 @@ class FFmpegAudioDecoder:
         # Parse ICY metadata (handles "StreamTitle: ..." and "StreamTitle='...';" forms)
         m = self._stream_title_re.search(text)
         if m:
-            title = m.group(1).strip()
+            # Icecast 2.4 экранирует не-latin1 символы HTML-сущностями
+            title = html.unescape(m.group(1).strip())
             # Remove trailing quote/semi if regex captured it loosely
             title = title.rstrip(";'\"")
             if ' - ' in title:

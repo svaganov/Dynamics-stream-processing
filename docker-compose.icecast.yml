@@ -1,0 +1,28 @@
+# Опциональный локальный Icecast 2.4.x для приёма выходных потоков панели.
+#
+# Зачем: Icecast 2.5.0 не отдаёт слушателям ICY-метаданные (StreamTitle) для
+# legacy-форматов (AAC/MP3) — апдейты принимает, но в поток не вставляет
+# (известная регрессия 2.5.0). На 2.4.x / icecast-kh метаданные работают.
+#
+# Запуск:   docker compose -f docker-compose.icecast.yml up -d
+# Панель:   в разделе «07 Настройка подключения к Icecast» станции —
+#           host 127.0.0.1, port 8801, mount /test.aacp (или свой),
+#           user source, password hackme.
+# Поток:    http://127.0.0.1:8801/test.aacp
+# Админка:  http://127.0.0.1:8801/admin/ (admin / hackme)
+#
+# Порт 8801 выбран, чтобы не конфликтовать с уже установленным Icecast
+# на 8800/8000; поменяйте на свободный при необходимости.
+
+services:
+  icecast:
+    image: moul/icecast:latest   # Icecast 2.4.x
+    container_name: audio-icecast
+    ports:
+      - "8801:8000"
+    environment:
+      ICECAST_HOSTNAME: localhost
+      ICECAST_SOURCE_PASSWORD: hackme
+      ICECAST_RELAY_PASSWORD: hackme
+      ICECAST_ADMIN_PASSWORD: hackme
+    restart: unless-stopped
