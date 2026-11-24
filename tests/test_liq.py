@@ -19,6 +19,20 @@ sys.path.insert(0, str(PROJECT_ROOT / "app"))
 import liq  # noqa: E402
 
 
+def make_output(out_id="out-1", codec="aac", bitrate=128, sample_rate=44100,
+                channels=2, host="ice.example", port=8000, mount="/radio7",
+                user="source", password="s3cret", name="", enabled=True):
+    return {
+        "id": out_id,
+        "name": name,
+        "enabled": enabled,
+        "encoder": {"codec": codec, "bitrate": bitrate,
+                    "sample_rate": sample_rate, "channels": channels},
+        "icecast": {"host": host, "port": port, "mount": mount,
+                    "user": user, "password": password},
+    }
+
+
 def make_cfg(**overrides):
     cfg = {
         "id": "station-7",
@@ -30,9 +44,8 @@ def make_cfg(**overrides):
         "compressor": {"enabled": True, "threshold": -20, "ratio": 4, "attack": 5, "release": 120, "makeup": 6},
         "loudnorm": {"enabled": True, "i": -14, "tp": -1.5, "lra": 11},
         "limiter": {"enabled": True, "ceiling_db": -1.0, "attack": 5, "release": 50},
-        "encoder": {"codec": "aac", "bitrate": 128, "sample_rate": 44100, "channels": 2},
-        "icecast": {"host": "ice.example", "port": 8000, "mount": "/radio7",
-                    "user": "source", "password": "s3cret"},
+        "outputs": [make_output()],
+        "monitor_output": "",
     }
     cfg.update(overrides)
     return cfg
@@ -204,12 +217,14 @@ class LiqGeneratorTest(unittest.TestCase):
 
     def test_icecast_connected_flag_in_output(self):
         # флаг подключения выхода: интерактивная bool + колбэки on_connect/
-        # on_disconnect пишут в её ref — панель читает «var.get panel_ice_connected»
+        # on_disconnect пишут в её ref — панель читает живьём
+        # «var.get panel_ice_connected_<id выхода>» (у каждого выхода свой флаг;
+        # id «out-1» санитизируется в имя переменной «out_1»)
         script = liq.generate_liq_script(make_cfg())
-        self.assertIn('interactive.bool("panel_ice_connected", false)', script)
-        self.assertIn('interactive.bool.ref("panel_ice_connected")', script)
-        self.assertIn("on_connect={ice_connected_ref := true}", script)
-        self.assertIn("on_disconnect={ice_connected_ref := false}", script)
+        self.assertIn('interactive.bool("panel_ice_connected_out_1", false)', script)
+        self.assertIn('interactive.bool.ref("panel_ice_connected_out_1")', script)
+        self.assertIn("on_connect={panel_ice_connected_out_1_ref := true}", script)
+        self.assertIn("on_disconnect={panel_ice_connected_out_1_ref := false}", script)
 
     def test_fallback_modes(self):
         # выключен — fallback в скрипте нет совсем
@@ -279,6 +294,56 @@ class LiqGeneratorTest(unittest.TestCase):
         self.assertNotIn("s3cret", masked)
         self.assertIn('password="***"', masked)
         self.assertIn("s3cret", script)  # в рабочем скрипте пароль настоящий
+
+    def test_multiple_outputs_each_with_own_encoder_and_flag(self):
+        # Несколько выходов: свой кодек/битрейт/точка Icecast и свой флаг
+        # подключения у каждого; вход при этом тянется один раз (один тракт)
+        cfg = make_cfg(outputs=[
+            make_output(out_id="hi", codec="aac", bitrate=256, sample_rate=48000,
+                        mount="/hi", password="pw1", name="Основной"),
+            make_output(out_id="low-mp3", codec="mp3", bitrate=128, sample_rate=44100,
+                        host="ice2.example", port=8010, mount="/low.mp3",
+                        password="pw2"),
+        ])
+        script = liq.generate_liq_script(cfg)
+        self.assertEqual(script.count("output.icecast("), 2)
+        self.assertIn("%fdkaac(channels=2, samplerate=48000, bitrate=256", script)
+        self.assertIn("%mp3(bitrate=128, samplerate=44100, stereo=true)", script)
+        self.assertIn('id="icecast_hi"', script)
+        self.assertIn('id="icecast_low_mp3"', script)  # дефис санитизирован
+        self.assertIn('interactive.bool("panel_ice_connected_hi", false)', script)
+        self.assertIn('interactive.bool("panel_ice_connected_low_mp3", false)', script)
+        self.assertIn('mount="/hi"', script)
+        self.assertIn('mount="/low.mp3"', script)
+        self.assertIn('host="ice2.example"', script)
+        # имя выхода: явное у первого, у второго (пусто) — имя станции
+        self.assertIn('name="Основной"', script)
+        self.assertIn('name="Радио 7"', script)
+        # маскируются пароли всех выходов
+        masked = liq.mask_liq_script(script, cfg)
+        self.assertNotIn("pw1", masked)
+        self.assertNotIn("pw2", masked)
+        self.assertIn("pw1", script)
+
+    def test_disabled_outputs_skipped_dummy_when_all_off(self):
+        cfg = make_cfg(outputs=[
+            make_output(out_id="on", mount="/on", password="pw"),
+            make_output(out_id="off", codec="mp3", bitrate=64,
+                        mount="/off", password="pw", enabled=False),
+        ])
+        script = liq.generate_liq_script(cfg)
+        # выключенный выход не попадает в скрипт вовсе
+        self.assertEqual(script.count("output.icecast("), 1)
+        self.assertIn('mount="/on"', script)
+        self.assertNotIn('mount="/off"', script)
+        self.assertNotIn("panel_ice_connected_off", script)
+        self.assertNotIn("output.dummy", script)
+
+        # все выходы выключены — фиктивный сток, чтобы тракт воркера жил
+        cfg["outputs"][0]["enabled"] = False
+        script = liq.generate_liq_script(cfg)
+        self.assertNotIn("output.icecast(", script)
+        self.assertIn("output.dummy(fallible=true, s)", script)
 
     def test_strings_escaped(self):
         cfg = make_cfg(source={"url": 'http://h/"q"', "reconnect": True, "reconnect_delay_max": 5},

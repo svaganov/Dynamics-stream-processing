@@ -37,6 +37,8 @@ switch на интерактивной переменной panel_bypass: пан
 BYPASS работающего воркера живьём (telnet: var.set panel_bypass = true|false).
 """
 
+import re
+
 EQ_FREQS = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]
 
 # Q IIR-пиковой полосы ≈ ширина 1 октава (аналог w=1. у бывшего
@@ -369,6 +371,70 @@ def _dyn_interactive_vars(cfg):
     return "\n".join(lines) if lines else None
 
 
+def _encoder_format(enc):
+    """Строка формата энкодера Liquidsoap для выхода (fdkaac / lame mp3)."""
+    codec = str(enc.get("codec") or "aac").lower()
+    sr = int(enc.get("sample_rate", 44100))
+    br = int(enc.get("bitrate", 128))
+    ch = int(enc.get("channels", 2))
+    if codec == "mp3":
+        return "%mp3(bitrate={br}, samplerate={sr}, stereo={st})".format(
+            br=br, sr=sr, st="true" if ch == 2 else "false")
+    return ("%fdkaac(channels={ch}, samplerate={sr}, bitrate={br}, "
+            "afterburner=true)").format(ch=ch, sr=sr, br=br)
+
+
+def _output_sections(cfg, station_id, station_name):
+    """N выходов станции: output.icecast на каждый включённый выход.
+
+    У каждого выхода свой флаг подключения panel_ice_connected_<id> —
+    панель читает его живьём по telnet (статус выходов по отдельности)."""
+    outputs = [o for o in (cfg.get("outputs") or []) if isinstance(o, dict)
+               and o.get("enabled")]
+    if not outputs:
+        return ("\n".join([
+            "# Все выходы выключены: фиктивный сток, чтобы тракт жил",
+            "output.dummy(fallible=true, s)",
+            "",
+        ]), [])
+
+    parts = []
+    flag_names = []
+    for out in outputs:
+        oid = re.sub(r"[^A-Za-z0-9_]", "_", str(out.get("id") or "out"))
+        enc = out.get("encoder") or {}
+        ice = out.get("icecast") or {}
+        flag = "panel_ice_connected_{}".format(oid)
+        flag_names.append(flag)
+        out_name = str(out.get("name") or "").strip() or station_name
+        parts += [
+            '# --- Выход «{oid}»: {codec} {br}k -> {host}:{port}{mount} ---'.format(
+                oid=oid, codec=str(enc.get("codec") or "aac").upper(),
+                br=int(enc.get("bitrate", 128)),
+                host=str(ice.get("host", "?")), port=int(ice.get("port", 8000)),
+                mount=str(ice.get("mount") or "/stream")),
+            '{flag} = interactive.bool("{flag}", false)'.format(flag=flag),
+            '{flag}_ref = interactive.bool.ref("{flag}")'.format(flag=flag),
+            "output.icecast(",
+            '  id="icecast_{oid}",'.format(oid=oid),
+            '  host="{host}",'.format(host=_liq_string(ice.get("host", "127.0.0.1"))),
+            "  port={port},".format(port=int(ice.get("port", 8000))),
+            '  user="{user}",'.format(user=_liq_string(ice.get("user", "source"))),
+            '  password="{pw}",'.format(pw=_liq_string(ice.get("password", ""))),
+            '  mount="{mount}",'.format(mount=_liq_string(str(ice.get("mount") or "/stream"))),
+            '  name="{name}",'.format(name=_liq_string(out_name)),
+            '  description="AudioPanel worker {sid}",'.format(sid=_liq_string(station_id)),
+            "  fallible=true,",
+            "  on_connect={{{flag}_ref := true}},".format(flag=flag),
+            "  on_disconnect={{{flag}_ref := false}},".format(flag=flag),
+            "  {},".format(_encoder_format(enc)),
+            "  s",
+            ")",
+            "",
+        ]
+    return "\n".join(parts), flag_names
+
+
 def _initial_gain_linear(cfg):
     """Стартовое линейное усиление интерактивной переменной из конфигурации."""
     gain = cfg.get("gain") or {}
@@ -384,8 +450,6 @@ def generate_liq_script(cfg):
     station_id = str(cfg.get("id") or "station")
     name = str(cfg.get("name") or station_id)
     src = cfg.get("source", {})
-    enc = cfg.get("encoder", {})
-    ice = cfg.get("icecast", {})
 
     url = str(src.get("url") or "")
     block = _processing_block(cfg)
@@ -466,14 +530,6 @@ def generate_liq_script(cfg):
         ]
 
     parts += [
-        # Флаг «подключён ли выход к Icecast»: колбэки output.icecast
-        # выставляют его при каждом подключении/обрыве, панель читает
-        # живьём по telnet «var.get panel_ice_connected».
-        "# Флаг подключения выхода: читается панелью по telnet "
-        "«var.get panel_ice_connected», колбэки выхода пишут в его ref",
-        'ice_connected = interactive.bool("panel_ice_connected", false)',
-        'ice_connected_ref = interactive.bool.ref("panel_ice_connected")',
-        "",
         # Живой StreamTitle: Liquidsoap (input.http на базе ffmpeg) не читает
         # in-stream ICY-блоки источника, поэтому панельный релей
         # metadata_relay вставляет тег через telnet «panel.set_title
@@ -489,32 +545,22 @@ def generate_liq_script(cfg):
         'server.register(namespace="panel", '
         'description="Set StreamTitle (url-encoded)", "set_title", panel_set_title)',
         "",
-        "output.icecast(",
-        '  id="icecast",',
-        '  host="{host}",'.format(host=_liq_string(ice.get("host", "127.0.0.1"))),
-        "  port={port},".format(port=int(ice.get("port", 8000))),
-        '  user="{user}",'.format(user=_liq_string(ice.get("user", "source"))),
-        '  password="{pw}",'.format(pw=_liq_string(ice.get("password", ""))),
-        '  mount="{mount}",'.format(mount=_liq_string(str(ice.get("mount") or "/stream"))),
-        '  name="{name}",'.format(name=_liq_string(name)),
-        '  description="AudioPanel worker {sid}",'.format(sid=_liq_string(station_id)),
-        "  fallible=true,",
-        "  on_connect={ice_connected_ref := true},",
-        "  on_disconnect={ice_connected_ref := false},",
-        "  %fdkaac(channels={ch}, samplerate={sr}, bitrate={br}, afterburner=true),".format(
-            ch=int(enc.get("channels", 2)), sr=int(enc.get("sample_rate", 44100)),
-            br=int(enc.get("bitrate", 128)),
-        ),
-        "  s",
-        ")",
-        "",
     ]
+    # Выходы станции (каждый со своим кодированием и точкой Icecast) +
+    # их флаги подключения panel_ice_connected_<id>.
+    outputs_block, _flag_names = _output_sections(cfg, station_id, name)
+    parts.append("# Выходы станции: у каждого свой флаг подключения — панель "
+                 "читает их живьём по telnet «var.get panel_ice_connected_<id>»")
+    parts.append(outputs_block)
     return "\n".join(parts)
 
 
 def mask_liq_script(script, cfg):
-    """Замаскированная для показа в UI копия скрипта (пароль Icecast)."""
-    password = str(cfg.get("icecast", {}).get("password") or "")
-    if password:
-        script = script.replace('password="{}"'.format(password), 'password="***"')
+    """Замаскированная для показа в UI копия скрипта (пароли Icecast выходов)."""
+    for out in cfg.get("outputs") or []:
+        if not isinstance(out, dict):
+            continue
+        password = str((out.get("icecast") or {}).get("password") or "")
+        if password:
+            script = script.replace('password="{}"'.format(password), 'password="***"')
     return script

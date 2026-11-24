@@ -127,19 +127,35 @@ DEFAULT_STREAM_CONFIG = {
         "attack": 5,        # ms
         "release": 50,      # ms
     },
-    "encoder": {
-        # кодирование всегда FDK-AAC в воркере Liquidsoap (%fdkaac)
-        "bitrate": 128,     # kbps
-        "sample_rate": 44100,
-        "channels": 2,
-    },
-    "icecast": {
-        "host": "127.0.0.1",
-        "port": 8000,
-        "mount": "/station-1",
-        "user": "source",
-        "password": "hackme",
-    },
+    # Выходы станции: каждый — кодирование + точка подключения Icecast.
+    # Старые одиночные поля encoder/icecast мигрируют в outputs[0]
+    # (см. _normalize_station). Модель выхода:
+    #   id, name (необяз.; пусто = имя станции), enabled,
+    #   encoder: {codec: aac|mp3, bitrate, sample_rate, channels},
+    #   icecast: {host, port, mount, user, password}
+    "outputs": [
+        {
+            "id": "out-1",
+            "name": "",
+            "enabled": True,
+            "encoder": {
+                "codec": "aac",     # aac (FDK-AAC) | mp3 (lame)
+                "bitrate": 128,     # kbps
+                "sample_rate": 44100,
+                "channels": 2,
+            },
+            "icecast": {
+                "host": "127.0.0.1",
+                "port": 8000,
+                "mount": "/station-1",
+                "user": "source",
+                "password": "hackme",
+            },
+        },
+    ],
+    # Какой выход слушаем/анализируем (подслушка B, анализатор):
+    # "" = автоматически самый высокий битрейт среди включённых.
+    "monitor_output": "",
     "autorestart": {
         "enabled": True,
         "delay": 5,         # сек
@@ -176,7 +192,7 @@ def _default_station(station_id="station-1", name="Станция 1"):
     station = copy.deepcopy(DEFAULT_STREAM_CONFIG)
     station["id"] = station_id
     station["name"] = name
-    station["icecast"]["mount"] = "/" + station_id
+    station["outputs"][0]["icecast"]["mount"] = "/" + station_id
     return station
 
 
@@ -200,11 +216,92 @@ def _read_json(path):
     return data if isinstance(data, dict) else {}
 
 
+OUTPUT_CODECS = ("aac", "mp3")
+OUTPUT_SAMPLE_RATES = (22050, 24000, 32000, 44100, 48000)
+
+
+def _normalize_output(raw, index, station_id):
+    """Приводит один выход станции к полной валидной модели."""
+    raw = raw if isinstance(raw, dict) else {}
+    out_id = str(raw.get("id") or "out-{}".format(index + 1)).strip()
+    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$", out_id):
+        out_id = "out-{}".format(index + 1)
+
+    enc = raw.get("encoder") if isinstance(raw.get("encoder"), dict) else {}
+    codec = str(enc.get("codec") or "aac").strip().lower()
+    if codec not in OUTPUT_CODECS:
+        codec = "aac"
+    max_br = 320
+    min_br = 32 if codec == "mp3" else 16
+    bitrate = int(max(min_br, min(max_br, int(enc.get("bitrate", 128) or 128))))
+    try:
+        sample_rate = int(enc.get("sample_rate", 44100))
+    except (TypeError, ValueError):
+        sample_rate = 44100
+    if sample_rate not in OUTPUT_SAMPLE_RATES:
+        sample_rate = 44100
+    channels = 1 if int(enc.get("channels", 2) or 2) == 1 else 2
+
+    ice = raw.get("icecast") if isinstance(raw.get("icecast"), dict) else {}
+    mount = str(ice.get("mount") or ("/" + station_id)).strip()
+    try:
+        port = int(ice.get("port", 8000))
+    except (TypeError, ValueError):
+        port = 8000
+    port = max(1, min(65535, port))
+
+    return {
+        "id": out_id,
+        "name": str(raw.get("name") or "").strip(),
+        "enabled": bool(raw.get("enabled", True)),
+        "encoder": {
+            "codec": codec,
+            "bitrate": bitrate,
+            "sample_rate": sample_rate,
+            "channels": channels,
+        },
+        "icecast": {
+            "host": str(ice.get("host") or "127.0.0.1").strip(),
+            "port": port,
+            "mount": "/" + mount.lstrip("/"),
+            "user": str(ice.get("user") or "source").strip() or "source",
+            "password": str(ice.get("password") or ""),
+        },
+    }
+
+
+def get_outputs(station):
+    """Список выходов станции (всегда непустой у нормализованной станции)."""
+    outputs = station.get("outputs")
+    return outputs if isinstance(outputs, list) else []
+
+
+def enabled_outputs(station):
+    return [o for o in get_outputs(station) if o.get("enabled")]
+
+
+def monitor_output(station):
+    """Выход для подслушки B/анализатора.
+
+    station["monitor_output"] задаёт id явно; пусто/нет такого id —
+    самый высокий битрейт среди включённых выходов (качественнее = информативнее)."""
+    outputs = enabled_outputs(station)
+    if not outputs:
+        return None
+    wanted = str(station.get("monitor_output") or "").strip()
+    if wanted:
+        for out in outputs:
+            if out["id"] == wanted:
+                return out
+    return max(outputs, key=lambda o: int((o.get("encoder") or {}).get("bitrate", 0)))
+
+
 def _normalize_station(raw, fallback_id=None, fallback_name=None):
     """Восстанавливает полную модель станции и бережно чинит повреждённые поля."""
+    raw = raw if isinstance(raw, dict) else {}
     station = _default_station()
-    if isinstance(raw, dict):
-        _deep_merge(station, raw)
+    _deep_merge(station, {k: v for k, v in raw.items()
+                          if k not in ("icecast", "encoder")})
 
     station_id = str(station.get("id") or fallback_id or "station-1").strip()
     if not STATION_ID_RE.match(station_id):
@@ -223,8 +320,30 @@ def _normalize_station(raw, fallback_id=None, fallback_name=None):
         "db": max(-24.0, min(24.0, float(gain.get("db", 0.0) or 0.0))),
     }
 
-    mount = str(station["icecast"].get("mount") or ("/" + station_id)).strip()
-    station["icecast"]["mount"] = "/" + mount.lstrip("/")
+    # Выходы: миграция одиночных encoder/icecast старой модели в outputs[0].
+    raw_outputs = raw.get("outputs")
+    if not isinstance(raw_outputs, list) or not raw_outputs:
+        legacy = {}
+        if isinstance(raw.get("icecast"), dict) or isinstance(raw.get("encoder"), dict):
+            legacy = {"icecast": raw.get("icecast"), "encoder": raw.get("encoder")}
+        raw_outputs = [legacy]
+    outputs = [_normalize_output(o, i, station_id) for i, o in enumerate(raw_outputs)]
+    # id выходов уникальны внутри станции
+    seen_ids = set()
+    for i, out in enumerate(outputs):
+        oid = out["id"]
+        n = 2
+        while oid in seen_ids:
+            oid = "{}-{}".format(out["id"], n)
+            n += 1
+        out["id"] = oid
+        seen_ids.add(oid)
+    station["outputs"] = outputs
+    # monitor_output, указывающий на несуществующий/выключенный выход, сбрасываем
+    # в авто (самый высокий битрейт) — см. monitor_output().
+    wanted_monitor = str(station.get("monitor_output") or "").strip()
+    if wanted_monitor and all(o["id"] != wanted_monitor for o in outputs):
+        station["monitor_output"] = ""
 
     gains = station["equalizer"].get("gains")
     if not isinstance(gains, list):
@@ -270,7 +389,7 @@ def _normalize_streams_doc(raw):
 
     # Загрузка должна быть отказоустойчивой: поврежденный реестр чиним, а не падаем.
     used_ids = set()
-    used_mounts = set()
+    used_targets = set()  # (host, port, mount) — точки выхода уникальны глобально
     for station in doc["streams"]:
         sid = station["id"]
         n = 2
@@ -280,13 +399,16 @@ def _normalize_streams_doc(raw):
         station["id"] = sid
         used_ids.add(sid)
 
-        mount = station["icecast"]["mount"]
-        n = 2
-        while mount in used_mounts:
-            mount = "{}-{}".format(station["icecast"]["mount"], n)
-            n += 1
-        station["icecast"]["mount"] = mount
-        used_mounts.add(mount)
+        for out in get_outputs(station):
+            ice = out["icecast"]
+            target = (ice["host"].lower(), ice["port"], ice["mount"])
+            n = 2
+            while target in used_targets:
+                mount = "{}-{}".format(ice["mount"], n)
+                n += 1
+                target = (ice["host"].lower(), ice["port"], mount)
+            ice["mount"] = target[2]
+            used_targets.add(target)
 
     return doc
 
@@ -329,13 +451,26 @@ def _validate_station_identity(station, current_id=None):
         raise ValueError("id станции может содержать латиницу, цифры, '-' и '_'")
 
     doc = _load_streams_unlocked()
+    own_targets = set()
+    for out in get_outputs(station):
+        ice = out["icecast"]
+        target = (ice["host"].lower(), ice["port"], ice["mount"])
+        if target in own_targets:
+            raise ValueError("два выхода станции смотрят на одну точку Icecast "
+                             "({}:{}{})".format(ice["host"], ice["port"], ice["mount"]))
+        own_targets.add(target)
     for other in doc["streams"]:
         if current_id is not None and other["id"] == current_id:
             continue
         if other["id"] == sid:
             raise ValueError("станция с таким id уже существует")
-        if other["icecast"]["mount"] == station["icecast"]["mount"]:
-            raise ValueError("точка монтирования Icecast уже используется другой станцией")
+        for other_out in get_outputs(other):
+            oi = other_out["icecast"]
+            target = (oi["host"].lower(), oi["port"], oi["mount"])
+            if target in own_targets:
+                raise ValueError("точка Icecast {}:{}{} уже используется станцией "
+                                 "«{}»".format(oi["host"], oi["port"], oi["mount"],
+                                               other.get("name") or other["id"]))
 
 
 def load_streams():
@@ -379,10 +514,13 @@ def create_station(raw):
             raw = dict(raw)
             raw["id"] = candidate
         station = _normalize_station(raw, fallback_name=raw.get("name") or raw.get("id"))
-        # У новой станции без явного mount используем собственный id, а mount шаблона.
+        # У новой станции без явного mount у первого выхода — mount по id станции.
+        raw_outputs = raw.get("outputs") if isinstance(raw.get("outputs"), list) else []
         raw_icecast = raw.get("icecast") if isinstance(raw.get("icecast"), dict) else {}
-        if "mount" not in raw_icecast:
-            station["icecast"]["mount"] = "/" + station["id"]
+        first_raw_ice = (raw_outputs[0].get("icecast") if raw_outputs
+                         and isinstance(raw_outputs[0], dict) else raw_icecast)
+        if not isinstance(first_raw_ice, dict) or "mount" not in first_raw_ice:
+            station["outputs"][0]["icecast"]["mount"] = "/" + station["id"]
         _validate_station_identity(station)
         doc["streams"].append(station)
         _save_streams_unlocked(doc)
@@ -553,9 +691,12 @@ def containerize_loopback(cfg):
     правятся icecast.host и hostname source.url.
     """
     cfg = copy.deepcopy(cfg)
-    ice = cfg.get("icecast")
-    if isinstance(ice, dict) and str(ice.get("host", "")).lower() in LOOPBACK_HOSTS:
-        ice["host"] = "host.docker.internal"
+    for out in cfg.get("outputs") or []:
+        if not isinstance(out, dict):
+            continue
+        ice = out.get("icecast")
+        if isinstance(ice, dict) and str(ice.get("host", "")).lower() in LOOPBACK_HOSTS:
+            ice["host"] = "host.docker.internal"
     source = cfg.get("source")
     if source and source.get("url"):
         source["url"] = _loopback_url_to_host_gateway(source["url"])
@@ -897,28 +1038,55 @@ class DockerWorkerManager:
             raise
         return re.sub(rb"\xff...", b"", buf).decode("utf-8", "replace")
 
-    def icecast_connected(self):
-        """True/False — состояние подключения выхода к Icecast живьём.
+    def icecast_connected(self, cfg=None):
+        """True/False — состояние подключения ВЫХОДОВ к Icecast живьём.
 
-        Читает интерактивный флаг panel_ice_connected воркера (его
-        выставляют on_connect/on_disconnect выхода output.icecast).
+        Читает интерактивные флаги panel_ice_connected_<id> воркера (их
+        выставляют on_connect/on_disconnect каждого output.icecast).
+        True — все включённые выходы подключены, False — хотя бы один нет.
         None — воркер не запущен, telnet недоступен или воркер работает
-        на старом скрипте без флага (статус неизвестен)."""
+        на старом скрипте без флагов (статус неизвестен)."""
+        per_output = self.outputs_connected(cfg)
+        if per_output is None:
+            return None
+        if not per_output:
+            return None  # нет включённых выходов — состояние не определено
+        if any(v is None for v in per_output.values()):
+            return None
+        return all(per_output.values())
+
+    def outputs_connected(self, cfg=None):
+        """{id выхода: True/False/None} — подключение каждого включённого выхода.
+
+        None у отдельного выхода — его флаг не прочитался; None целиком —
+        воркер/telnet недоступен."""
+        if cfg is None:
+            with self.lock:
+                cfg = self._run_cfg
+        outputs = [o for o in (cfg or {}).get("outputs", [])
+                   if isinstance(o, dict) and o.get("enabled")]
+        if not outputs:
+            return {}
         with self.lock:
             container = self.container
         if container is None or not self._is_running(container):
             self._ice_sess_close()
             return None
-        try:
-            out = self._ice_telnet("var.get panel_ice_connected")
-        except Exception:
-            return None
-        first = (out.strip().splitlines() or [""])[0].strip().lower()
-        if first == "true":
-            return True
-        if first == "false":
-            return False
-        return None  # «variable not found» и т.п. — старый скрипт
+        result = {}
+        for out in outputs:
+            oid = re.sub(r"[^A-Za-z0-9_]", "_", str(out.get("id") or "out"))
+            try:
+                out_text = self._ice_telnet("var.get panel_ice_connected_{}".format(oid))
+            except Exception:
+                return None
+            first = (out_text.strip().splitlines() or [""])[0].strip().lower()
+            if first == "true":
+                result[out["id"]] = True
+            elif first == "false":
+                result[out["id"]] = False
+            else:
+                result[out["id"]] = None  # «variable not found» — старый скрипт
+        return result
 
     def input_connected(self):
         """True/False — идёт ли входной поток (input.http подключён к источнику).
@@ -1150,9 +1318,11 @@ class DockerWorkerManager:
             except Exception:
                 running = False
         if running:
-            icecast_connected = self.icecast_connected()
+            outputs_conn = self.outputs_connected(current_cfg)
+            icecast_connected = self.icecast_connected(current_cfg)
             input_connected = self.input_connected()
         else:
+            outputs_conn = None
             icecast_connected = input_connected = None
         return {
             "station_id": self.station_id,
@@ -1164,8 +1334,10 @@ class DockerWorkerManager:
             "engine": "liquidsoap",
             "detail": "Liquidsoap worker · {}".format(WORKER_IMAGE),
             "container": self.container_name if container is not None else None,
-            # живой флаг on_connect/on_disconnect выхода; None — неизвестно
+            # живой флаг: True — ВСЕ включённые выходы подключены; None — неизвестно
             "icecast_connected": icecast_connected,
+            # {id выхода: True/False/None} — подключение по каждому выходу
+            "outputs_connected": outputs_conn,
             # input.status источника: connected <url> ↔ прочее; None — неизвестно
             "input_connected": input_connected,
         }
@@ -1322,8 +1494,12 @@ def _analyzer_stream_url(cfg):
 
     Анализатор всегда в контейнере: loopback из конфига — это loopback
     хоста, поэтому переписываем на host.docker.internal (контейнеру
-    добавляется extra_hosts host-gateway). Реальные адреса не трогаем."""
-    ice = cfg["icecast"]
+    добавляется extra_hosts host-gateway). Реальные адреса не трогаем.
+    Анализируется выход мониторинга (monitor_output / самый высокий битрейт)."""
+    out = monitor_output(cfg)
+    if out is None:
+        return ""
+    ice = out["icecast"]
     host = str(ice["host"])
     if host.lower() in LOOPBACK_HOSTS:
         host = "host.docker.internal"
@@ -1884,10 +2060,14 @@ def _ffmpeg_available(settings):
     return shutil.which("ffmpeg") is not None
 
 
-def _output_stream_url(cfg):
+def _output_stream_url(cfg, output=None):
     """URL выходного потока станции для чтения с машины панели
-    (используется A/B-прослушкой выхода и LUFS-метром)."""
-    ice = cfg["icecast"]
+    (используется A/B-прослушкой выхода и LUFS-метром).
+    По умолчанию — выход мониторинга (monitor_output / самый высокий битрейт)."""
+    out = output or monitor_output(cfg)
+    if out is None:
+        return ""
+    ice = out["icecast"]
     host = str(ice["host"])
     # Имя хоста из Docker-контура (host.docker.internal и т.п.) с хоста
     # панели недоступно: Icecast публикуется на loopback — слушаем его.

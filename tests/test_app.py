@@ -223,14 +223,17 @@ class PanelApiTest(unittest.TestCase):
         self.assertEqual(res.status_code, 201)
         station2 = res.get_json()["station"]
         self.assertEqual(station2["id"], "station-2")
-        self.assertEqual(station2["icecast"]["mount"], "/station-2")
+        # у новой станции один выход по умолчанию, mount — по id станции
+        self.assertEqual(len(station2["outputs"]), 1)
+        self.assertEqual(station2["outputs"][0]["icecast"]["mount"], "/station-2")
 
         res = self.client.post("/api/streams", json={"id": "station-2", "name": "Дубликат"})
         self.assertEqual(res.status_code, 409)
 
+        # точка выхода (host, port, mount) уникальна глобально
         res = self.client.put(
             "/api/streams/station-2",
-            json={"icecast": {"mount": "/station-1"}},
+            json={"outputs": [{"icecast": {"mount": "/station-1"}}]},
         )
         self.assertEqual(res.status_code, 409)
 
@@ -278,7 +281,11 @@ class PanelApiTest(unittest.TestCase):
         station = data["streams"][0]
         self.assertEqual(station["id"], "station-1")
         self.assertEqual(station["source"]["reconnect_delay_max"], 7)
-        self.assertEqual(station["icecast"]["mount"], "/stream")
+        # одиночные encoder/icecast старого конфига мигрировали в outputs[0]
+        self.assertNotIn("icecast", station)
+        self.assertNotIn("encoder", station)
+        self.assertEqual(station["outputs"][0]["icecast"]["mount"], "/stream")
+        self.assertEqual(station["outputs"][0]["icecast"]["password"], "secret")
         self.assertEqual(data["settings"]["ffmpeg_path"], "C:/ffmpeg/bin/ffmpeg.exe")
 
         flat = self.client.get("/api/config").get_json()
@@ -287,7 +294,7 @@ class PanelApiTest(unittest.TestCase):
 
     def test_command_masks_icecast_password(self):
         res = self.client.post("/api/streams/station-1/command", json={
-            "icecast": {"password": "super-secret"},
+            "outputs": [{"id": "out-1", "icecast": {"password": "super-secret"}}],
         })
         self.assertEqual(res.status_code, 200)
         text = res.get_json()["text"]
@@ -424,29 +431,55 @@ class PanelApiTest(unittest.TestCase):
         station = self.client.get("/api/streams/" + station_id).get_json()["station"]
         self.assertFalse(station["bypass"])
 
-    def test_icecast_connected_reads_telnet_flag(self):
-        # true/false — состояние флага; «variable not found» (старый
-        # скрипт) и недоступный telnet — None (статус неизвестен).
+    def test_outputs_connected_reads_per_output_flags(self):
+        # У каждого включённого выхода — свой флаг panel_ice_connected_<id>:
+        # true/false — состояние; «variable not found» (старый скрипт) и обрыв
+        # telnet — None (неизвестно). Выключенные выходы не опрашиваются.
         # Опрос идёт по постоянной telnet-сессии (_ice_telnet), чтобы не
         # спамить лог воркера парами «New client / disconnected».
         station_id, manager = self._make_running_liquidsoap_station()
-
-        with mock.patch.object(manager, "_ice_telnet", return_value="true\nEND") as tel:
-            self.assertIs(manager.icecast_connected(), True)
-        tel.assert_called_once_with("var.get panel_ice_connected")
-
-        with mock.patch.object(manager, "_ice_telnet", return_value="false\nEND"):
-            self.assertIs(manager.icecast_connected(), False)
+        cfg = {"outputs": [{"id": "out-1", "enabled": True},
+                           {"id": "mobile", "enabled": True},
+                           {"id": "off", "enabled": False}]}
+        replies = {"var.get panel_ice_connected_out_1": "true\nEND",
+                   "var.get panel_ice_connected_mobile": "false\nEND"}
 
         with mock.patch.object(manager, "_ice_telnet",
-                               return_value="Syntax error or variable not found.\nEND"):
-            self.assertIsNone(manager.icecast_connected())
+                               side_effect=lambda cmd: replies[cmd]) as tel:
+            per = manager.outputs_connected(cfg)
+        self.assertEqual(per, {"out-1": True, "mobile": False})
+        self.assertEqual(tel.call_count, 2)  # выключенный выход не опрашивается
 
-        with mock.patch.object(manager, "_ice_telnet", side_effect=OSError("refused")):
-            self.assertIsNone(manager.icecast_connected())
+        # агрегат: все включённые подключены — True; хотя бы один нет — False
+        with mock.patch.object(manager, "_ice_telnet",
+                               side_effect=lambda cmd: replies[cmd]):
+            self.assertIs(manager.icecast_connected(cfg), False)
+        replies["var.get panel_ice_connected_mobile"] = "true\nEND"
+        with mock.patch.object(manager, "_ice_telnet",
+                               side_effect=lambda cmd: replies[cmd]):
+            self.assertIs(manager.icecast_connected(cfg), True)
+
+        # флаг не прочитался («variable not found» — старый скрипт): неизвестно
+        replies["var.get panel_ice_connected_mobile"] = \
+            "Syntax error or variable not found.\nEND"
+        with mock.patch.object(manager, "_ice_telnet",
+                               side_effect=lambda cmd: replies[cmd]):
+            self.assertIsNone(manager.icecast_connected(cfg))
+            self.assertEqual(manager.outputs_connected(cfg),
+                             {"out-1": True, "mobile": None})
+
+        # обрыв telnet — None целиком
+        with mock.patch.object(manager, "_ice_telnet", side_effect=OSError("closed")):
+            self.assertIsNone(manager.outputs_connected(cfg))
 
         # воркер не запущен — None, telnet не дёргается
         manager.container = None
+        with mock.patch.object(manager, "_ice_telnet") as tel:
+            self.assertIsNone(manager.outputs_connected(cfg))
+            tel.assert_not_called()
+
+        # без конфига (воркер не стартовал) — None, telnet не дёргается
+        manager.container = FakeLiquidsoapContainer()
         with mock.patch.object(manager, "_ice_telnet") as tel:
             self.assertIsNone(manager.icecast_connected())
             tel.assert_not_called()
@@ -634,11 +667,12 @@ class PanelApiTest(unittest.TestCase):
             panel.stop_listeners("station-1")
 
     def test_listen_loopback_rewrite_in_container_mode(self):
-        # Панель в контейнере: loopback-адреса источника и Icecast в подслушке
-        # указывают на loopback контейнера — переписываются на
+        # Панель в контейнере: loopback-адреса источника и Icecast выхода в
+        # подслушке указывают на loopback контейнера — переписываются на
         # host.docker.internal, как в скриптах воркеров.
         self.client.put("/api/streams/station-1", json={
-            "icecast": {"host": "127.0.0.1", "port": 8800, "mount": "/out.aacp"},
+            "outputs": [{"icecast": {"host": "127.0.0.1", "port": 8800,
+                                     "mount": "/out.aacp"}}],
         })
         popen_patch, calls, procs = self.make_fake_popen()
         with popen_patch, mock.patch.object(panel, "_PANEL_INSIDE_CONTAINER", True):
@@ -658,7 +692,8 @@ class PanelApiTest(unittest.TestCase):
         # Панель на хосте: host.docker.internal из конфига недоступен —
         # слушаем loopback (прежнее поведение сохранено).
         self.client.put("/api/streams/station-1", json={
-            "icecast": {"host": "host.docker.internal", "port": 8800, "mount": "/out.aacp"},
+            "outputs": [{"icecast": {"host": "host.docker.internal", "port": 8800,
+                                     "mount": "/out.aacp"}}],
         })
         popen_patch, calls, procs = self.make_fake_popen()
         with popen_patch, mock.patch.object(panel, "_PANEL_INSIDE_CONTAINER", False):
@@ -686,40 +721,44 @@ class PanelApiTest(unittest.TestCase):
                 "/x/station.liq")
 
     def test_containerize_loopback_rewrites_icecast_and_source(self):
-        # Воркер в контейнере: loopback там — сам контейнер. Icecast и
-        # источник на той же машине переписываются на host.docker.internal,
-        # причём только в копии конфига (реестр не трогаем).
+        # Воркер в контейнере: loopback там — сам контейнер. Icecast всех
+        # выходов и источник на той же машине переписываются на
+        # host.docker.internal, причём только в копии конфига (реестр не трогаем).
         cfg = {
             "source": {"url": "http://127.0.0.1:8000/live?x=1"},
-            "icecast": {"host": "localhost", "port": 8800, "mount": "/m"},
+            "outputs": [
+                {"icecast": {"host": "localhost", "port": 8800, "mount": "/m"}},
+                {"icecast": {"host": "127.0.0.1", "port": 8801, "mount": "/m2"}},
+            ],
         }
         out = panel.containerize_loopback(cfg)
-        self.assertEqual(out["icecast"]["host"], "host.docker.internal")
+        self.assertEqual(out["outputs"][0]["icecast"]["host"], "host.docker.internal")
+        self.assertEqual(out["outputs"][1]["icecast"]["host"], "host.docker.internal")
         self.assertEqual(out["source"]["url"],
                          "http://host.docker.internal:8000/live?x=1")
         # исходный конфиг не изменился
-        self.assertEqual(cfg["icecast"]["host"], "localhost")
+        self.assertEqual(cfg["outputs"][0]["icecast"]["host"], "localhost")
         self.assertEqual(cfg["source"]["url"], "http://127.0.0.1:8000/live?x=1")
 
     def test_containerize_loopback_keeps_external_hosts(self):
         cfg = {
             "source": {"url": "https://radio.example.com/stream.aacp"},
-            "icecast": {"host": "icecast.example-cdn.com", "port": 8443},
+            "outputs": [{"icecast": {"host": "icecast.example-cdn.com", "port": 8443}}],
         }
         out = panel.containerize_loopback(cfg)
-        self.assertEqual(out["icecast"]["host"], "icecast.example-cdn.com")
+        self.assertEqual(out["outputs"][0]["icecast"]["host"], "icecast.example-cdn.com")
         self.assertEqual(out["source"]["url"], "https://radio.example.com/stream.aacp")
 
     def test_containerize_loopback_preserves_url_userinfo_and_port(self):
         cfg = {"source": {"url": "http://user:pw@localhost:9000/a"},
-               "icecast": {"host": "127.0.0.1"}}
+               "outputs": [{"icecast": {"host": "127.0.0.1"}}]}
         out = panel.containerize_loopback(cfg)
         self.assertEqual(out["source"]["url"],
                          "http://user:pw@host.docker.internal:9000/a")
 
     def test_containerize_loopback_rewrites_fallback_url(self):
         cfg = {"source": {"url": "http://127.0.0.1:8000/live"},
-               "icecast": {"host": "127.0.0.1"},
+               "outputs": [{"icecast": {"host": "127.0.0.1"}}],
                "fallback": {"enabled": True, "mode": "url",
                             "url": "http://127.0.0.1:8800/backup.aacp"}}
         out = panel.containerize_loopback(cfg)
@@ -733,19 +772,36 @@ class PanelApiTest(unittest.TestCase):
     def test_analyzer_stream_url(self):
         # Анализатор всегда в контейнере: loopback из конфига — loopback
         # хоста, переписываем на host.docker.internal
-        cfg = {"icecast": {"host": "127.0.0.1", "port": 9000, "mount": "/test.aacp"}}
+        def out(host, port, mount, bitrate=128, out_id="out-1", enabled=True):
+            return {"id": out_id, "enabled": enabled,
+                    "encoder": {"codec": "aac", "bitrate": bitrate,
+                                "sample_rate": 44100, "channels": 2},
+                    "icecast": {"host": host, "port": port, "mount": mount,
+                                "user": "source", "password": ""}}
+
+        cfg = {"outputs": [out("127.0.0.1", 9000, "/test.aacp")]}
         self.assertEqual(panel._analyzer_stream_url(cfg),
                          "http://host.docker.internal:9000/test.aacp")
-        cfg = {"icecast": {"host": "localhost", "port": 8800, "mount": "live"}}
+        cfg = {"outputs": [out("localhost", 8800, "live")]}
         self.assertEqual(panel._analyzer_stream_url(cfg),
                          "http://host.docker.internal:8800/live")
         # реальные адреса (LAN/интернет/host.docker.internal) не трогаем
-        cfg = {"icecast": {"host": "192.168.0.223", "port": 8800, "mount": "/test.aacp"}}
+        cfg = {"outputs": [out("192.168.0.223", 8800, "/test.aacp")]}
         self.assertEqual(panel._analyzer_stream_url(cfg),
                          "http://192.168.0.223:8800/test.aacp")
-        cfg = {"icecast": {"host": "host.docker.internal", "port": 9000, "mount": "/m"}}
+        cfg = {"outputs": [out("host.docker.internal", 9000, "/m")]}
         self.assertEqual(panel._analyzer_stream_url(cfg),
                          "http://host.docker.internal:9000/m")
+        # авто-мониторинг — выход с самым высоким битрейтом среди включённых
+        cfg = {"outputs": [out("10.0.0.1", 8000, "/hi", bitrate=256, out_id="hi"),
+                          out("10.0.0.1", 8000, "/low", bitrate=96, out_id="low")]}
+        self.assertEqual(panel._analyzer_stream_url(cfg), "http://10.0.0.1:8000/hi")
+        # явный выбор мониторинга — monitor_output
+        cfg["monitor_output"] = "low"
+        self.assertEqual(panel._analyzer_stream_url(cfg), "http://10.0.0.1:8000/low")
+        # все выходы выключены — анализировать нечего
+        cfg = {"outputs": [out("10.0.0.1", 8000, "/hi", enabled=False)]}
+        self.assertEqual(panel._analyzer_stream_url(cfg), "")
 
     def test_analyzer_container_name_sanitized(self):
         self.assertEqual(panel._analyzer_container_name("station-1"),
@@ -782,8 +838,8 @@ class PanelApiTest(unittest.TestCase):
         res = self.client.post("/api/streams", json={"name": "Liq"}).get_json()["station"]
         self.client.put("/api/streams/" + res["id"], json={
             "engine": "liquidsoap",
-            "icecast": {"host": "127.0.0.1", "port": 8800, "mount": "/t",
-                        "user": "source", "password": "pw"},
+            "outputs": [{"icecast": {"host": "127.0.0.1", "port": 8800, "mount": "/t",
+                                     "user": "source", "password": "pw"}}],
             "source": {"url": "http://127.0.0.1:8000/live"},
         })
         data = self.client.post("/api/streams/" + res["id"] + "/command",
@@ -793,7 +849,7 @@ class PanelApiTest(unittest.TestCase):
         self.assertNotIn("127.0.0.1", data["text"])
         # реестр при этом хранит адреса как задал пользователь
         station = self.client.get("/api/streams/" + res["id"]).get_json()["station"]
-        self.assertEqual(station["icecast"]["host"], "127.0.0.1")
+        self.assertEqual(station["outputs"][0]["icecast"]["host"], "127.0.0.1")
         self.assertEqual(station["source"]["url"], "http://127.0.0.1:8000/live")
 
     def test_adjust_limiter_clamps_and_persists(self):
@@ -822,6 +878,72 @@ class PanelApiTest(unittest.TestCase):
             "/api/streams/{}/adjust".format(station_id),
             json={"limiter": [-1, 5, 50]})
         self.assertEqual(res.status_code, 400)
+
+    def test_outputs_crud_and_monitor_output(self):
+        # Два выхода: нормализация полей, уникальные id, выбор мониторинга
+        res = self.client.put("/api/streams/station-1", json={
+            "outputs": [
+                {"id": "hi",
+                 "encoder": {"codec": "aac", "bitrate": 256, "sample_rate": 48000,
+                             "channels": 2},
+                 "icecast": {"host": "ice.example", "port": 8000, "mount": "/hi"}},
+                {"id": "hi",
+                 "encoder": {"codec": "mp3", "bitrate": 96, "sample_rate": 44100,
+                             "channels": 1},
+                 "icecast": {"host": "ice.example", "port": 8000, "mount": "/low.mp3"}},
+            ],
+        })
+        self.assertEqual(res.status_code, 200)
+        st = res.get_json()["station"]
+        # дубль id выхода получил суффикс, поля нормализованы
+        self.assertEqual([o["id"] for o in st["outputs"]], ["hi", "hi-2"])
+        self.assertEqual(st["outputs"][1]["encoder"]["codec"], "mp3")
+        self.assertEqual(st["outputs"][1]["encoder"]["channels"], 1)
+        self.assertEqual(st["outputs"][0]["icecast"]["user"], "source")
+        # авто-мониторинг — самый высокий битрейт среди включённых
+        self.assertEqual(st["monitor_output"], "")
+        self.assertEqual(panel.monitor_output(st)["id"], "hi")
+        # явный выбор мониторинга сохраняется
+        st = self.client.put("/api/streams/station-1", json={
+            "monitor_output": "hi-2"}).get_json()["station"]
+        self.assertEqual(st["monitor_output"], "hi-2")
+        self.assertEqual(panel.monitor_output(st)["id"], "hi-2")
+        # несуществующий выход сбрасывается в авто
+        st = self.client.put("/api/streams/station-1", json={
+            "monitor_output": "nope"}).get_json()["station"]
+        self.assertEqual(st["monitor_output"], "")
+        self.assertEqual(panel.monitor_output(st)["id"], "hi")
+
+    def test_outputs_same_target_within_station_rejected(self):
+        # два выхода одной станции на одну точку Icecast — ошибка
+        res = self.client.put("/api/streams/station-1", json={
+            "outputs": [
+                {"icecast": {"host": "ice.example", "port": 8000, "mount": "/same"}},
+                {"icecast": {"host": "ICE.example", "port": 8000, "mount": "/same"}},
+            ]})
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("одну точку", res.get_json()["error"])
+
+    def test_legacy_station_encoder_icecast_migrate_to_outputs(self):
+        # реестр старого формата (одиночные encoder/icecast) мигрирует в
+        # outputs[0] при загрузке, верхнеуровневые ключи исчезают
+        doc = {"settings": {}, "streams": [{
+            "id": "old-1", "name": "Старая",
+            "encoder": {"codec": "aac", "bitrate": 96, "sample_rate": 44100,
+                        "channels": 2},
+            "icecast": {"host": "ice.old", "port": 8000, "mount": "/old",
+                        "user": "source", "password": "pw"},
+        }]}
+        Path(panel.STREAMS_PATH).write_text(json.dumps(doc), encoding="utf-8")
+        station = self.client.get("/api/streams/old-1").get_json()["station"]
+        self.assertNotIn("icecast", station)
+        self.assertNotIn("encoder", station)
+        self.assertEqual(len(station["outputs"]), 1)
+        out = station["outputs"][0]
+        self.assertEqual(out["encoder"]["bitrate"], 96)
+        self.assertEqual(out["icecast"]["host"], "ice.old")
+        self.assertEqual(out["icecast"]["mount"], "/old")
+        self.assertEqual(out["icecast"]["password"], "pw")
 
     def test_process_isolation_and_autorestart(self):
         res = self.client.post("/api/streams", json={"name": "Радио 2"})

@@ -252,14 +252,6 @@ const FIELDS = {
   lim_ceiling_db: ["limiter", "ceiling_db", "num"],
   lim_attack:     ["limiter", "attack", "num"],
   lim_release:    ["limiter", "release", "num"],
-  enc_bitrate:    ["encoder", "bitrate", "num"],
-  enc_sample_rate:["encoder", "sample_rate", "num"],
-  enc_channels:   ["encoder", "channels", "num"],
-  ice_host:       ["icecast", "host"],
-  ice_port:       ["icecast", "port", "num"],
-  ice_mount:      ["icecast", "mount"],
-  ice_user:       ["icecast", "user"],
-  ice_password:   ["icecast", "password"],
   ffmpeg_path:    ["ffmpeg_path"],
   ar_enabled:     ["autorestart", "enabled", "bool"],
   ar_delay:       ["autorestart", "delay", "num"],
@@ -286,6 +278,10 @@ function collectConfig() {
     node[keys[keys.length - 1]] = value;
   }
   cfg.equalizer.gains = EQ_FREQS.map((_, i) => parseFloat($("eq_b" + i).value));
+  // Выходы — динамический редактор (см. ниже): рабочая копия в outputsState
+  cfg.outputs = outputsState.map((out) => JSON.parse(JSON.stringify(out)));
+  const mon = $("monitor_output");
+  cfg.monitor_output = mon ? mon.value : "";
   return cfg;
 }
 
@@ -301,10 +297,273 @@ function fillForm(cfg) {
   }
   const gains = (cfg.equalizer && cfg.equalizer.gains) || [];
   gains.forEach((g, i) => { if (i < EQ_FREQS.length) $("eq_b" + i).value = g; });
+  // выходы: рабочая копия + перерисовка редактора (мониторинг — из конфига)
+  outputsState = (cfg.outputs || []).map((out) => JSON.parse(JSON.stringify(out)));
+  if (!outputsState.length) outputsState = [newOutputDefaults(1)];
+  collapsedOutputs.clear(); // при загрузке станции список выходов свёрнут
+  outputsState.forEach((out) => collapsedOutputs.add(out.id));
+  renderOutputsEditor(cfg.monitor_output || "");
   syncEqLabels();
   syncLabels();
   syncCardState();
 }
+
+/* ---------- выходы станции: динамический редактор ----------
+   Модель выхода: {id, name, enabled, encoder:{codec,bitrate,sample_rate,
+   channels}, icecast:{host,port,mount,user,password}}. Редактор хранит
+   рабочую копию в outputsState; collectConfig() забирает её в cfg.outputs,
+   сервер нормализует и валидирует (уникальность точек Icecast и т.п.). */
+
+const OUTPUT_BITRATES = [32, 64, 96, 128, 160, 192, 256, 320];
+const OUTPUT_SAMPLE_RATES = [22050, 24000, 32000, 44100, 48000];
+let outputsState = [];
+/* Свёрнутые карточки выходов (по id): список компактный, нужный выход
+   разворачивается кликом по заголовку. Новый выход — сразу развёрнут. */
+const collapsedOutputs = new Set();
+
+function newOutputDefaults(n) {
+  const station = selectedStation();
+  const sid = (station && station.id) || currentStationId || "station";
+  return {
+    id: "out-" + n,
+    name: "",
+    enabled: true,
+    encoder: { codec: "aac", bitrate: 128, sample_rate: 44100, channels: 2 },
+    icecast: { host: "127.0.0.1", port: 8000, mount: "/" + sid + "-" + n,
+               user: "source", password: "hackme" },
+  };
+}
+
+function setOutputField(out, path, value) {
+  const keys = path.split(".");
+  let node = out;
+  for (let i = 0; i < keys.length - 1; i++) node = node[keys[i]];
+  node[keys[keys.length - 1]] = value;
+}
+
+function outTitleText(out, i) {
+  const enc = out.encoder || {}, ice = out.icecast || {};
+  const label = out.name || out.id || ("выход " + (i + 1));
+  return (i + 1) + ". " + label + " · " +
+    String(enc.codec || "aac").toUpperCase() + " " + (enc.bitrate || "?") + "k → " +
+    (ice.host || "?") + ":" + (ice.port || "?") + String(ice.mount || "");
+}
+
+function makeOutField(labelText, input) {
+  const field = document.createElement("div");
+  field.className = "field";
+  const label = document.createElement("label");
+  label.textContent = labelText;
+  field.appendChild(label);
+  field.appendChild(input);
+  return field;
+}
+
+function makeOutInput(out, path, opts) {
+  opts = opts || {};
+  let el;
+  if (opts.values) {
+    el = document.createElement("select");
+    el.style.width = "100%";
+    for (const [v, label] of opts.values) {
+      const o = document.createElement("option");
+      o.value = String(v);
+      o.textContent = label;
+      el.appendChild(o);
+    }
+  } else {
+    el = document.createElement("input");
+    el.type = opts.type || "text";
+    if (opts.placeholder) el.placeholder = opts.placeholder;
+    if (opts.min !== undefined) el.min = opts.min;
+    if (opts.max !== undefined) el.max = opts.max;
+    if (el.type === "password") el.autocomplete = "off";
+    else el.spellcheck = false;
+  }
+  el.dataset.field = path;
+  if (opts.num) el.dataset.num = "1";
+  let node = out;
+  for (const k of path.split(".")) node = node ? node[k] : undefined;
+  if (el.type === "checkbox") el.checked = Boolean(node);
+  else if (node !== undefined && node !== null) el.value = node;
+  return el;
+}
+
+function renderOutputsEditor(preferredMonitor) {
+  const list = $("outputsList");
+  list.innerHTML = "";
+  outputsState.forEach((out, i) => {
+    const card = document.createElement("div");
+    card.className = "output-card" + (out.enabled ? "" : " off") +
+      (collapsedOutputs.has(out.id) ? " collapsed" : "");
+    card.dataset.idx = String(i);
+
+    const head = document.createElement("div");
+    head.className = "output-head";
+    head.title = "Клик — свернуть/развернуть выход";
+    const chev = document.createElement("span");
+    chev.className = "chev";
+    chev.textContent = "▸";
+    const headDot = document.createElement("span");
+    headDot.className = "head-dot";
+    const title = document.createElement("span");
+    title.className = "out-title";
+    title.textContent = outTitleText(out, i);
+    const grow = document.createElement("span");
+    grow.className = "grow";
+    const onLabel = document.createElement("span");
+    onLabel.style.cssText = "font-size:10.5px;color:var(--text-dim);letter-spacing:0.12em;";
+    onLabel.textContent = "ВКЛ";
+    const sw = document.createElement("span");
+    sw.className = "switch";
+    sw.appendChild(makeOutInput(out, "enabled", { type: "checkbox" }));
+    const track = document.createElement("span");
+    track.className = "track";
+    sw.appendChild(track);
+    const del = document.createElement("button");
+    del.className = "btn danger out-del";
+    del.textContent = "✕";
+    del.title = "Удалить выход";
+    head.append(chev, headDot, title, grow, onLabel, sw, del);
+    // клик по заголовку сворачивает/разворачивает; тумблер и удаление — мимо
+    head.addEventListener("click", (e) => {
+      if (e.target.closest(".switch") || e.target.closest(".out-del")) return;
+      card.classList.toggle("collapsed");
+      if (card.classList.contains("collapsed")) collapsedOutputs.add(out.id);
+      else collapsedOutputs.delete(out.id);
+    });
+
+    const nameField = makeOutField(
+      "Название выхода (icy-name; пусто — имя станции)",
+      makeOutInput(out, "name"));
+
+    const encSub = document.createElement("div");
+    encSub.className = "output-sub";
+    encSub.textContent = "Кодирование";
+    const encRow1 = document.createElement("div");
+    encRow1.className = "row2";
+    encRow1.appendChild(makeOutField("Формат", makeOutInput(out, "encoder.codec", {
+      values: [["aac", "AAC (FDK-AAC)"], ["mp3", "MP3 (LAME)"]],
+    })));
+    encRow1.appendChild(makeOutField("Битрейт, kbps", makeOutInput(out, "encoder.bitrate", {
+      values: OUTPUT_BITRATES.map((b) => [b, String(b)]), num: true,
+    })));
+    const encRow2 = document.createElement("div");
+    encRow2.className = "row2";
+    encRow2.appendChild(makeOutField("Частота, Гц", makeOutInput(out, "encoder.sample_rate", {
+      values: OUTPUT_SAMPLE_RATES.map((s) => [s, String(s)]), num: true,
+    })));
+    encRow2.appendChild(makeOutField("Каналы", makeOutInput(out, "encoder.channels", {
+      values: [[2, "Стерео"], [1, "Моно"]], num: true,
+    })));
+
+    const iceSub = document.createElement("div");
+    iceSub.className = "output-sub";
+    iceSub.textContent = "Подключение к Icecast";
+    const iceRow1 = document.createElement("div");
+    iceRow1.className = "row2";
+    iceRow1.appendChild(makeOutField("Хост", makeOutInput(out, "icecast.host")));
+    iceRow1.appendChild(makeOutField("Порт", makeOutInput(out, "icecast.port", {
+      type: "number", num: true, min: 1, max: 65535,
+    })));
+    const mountField = makeOutField("Точка монтирования",
+      makeOutInput(out, "icecast.mount", { placeholder: "/stream" }));
+    const iceRow2 = document.createElement("div");
+    iceRow2.className = "row2";
+    iceRow2.appendChild(makeOutField("Пользователь", makeOutInput(out, "icecast.user")));
+    iceRow2.appendChild(makeOutField("Пароль",
+      makeOutInput(out, "icecast.password", { type: "password" })));
+
+    const status = document.createElement("div");
+    status.className = "ice-status";
+    const dot = document.createElement("span");
+    dot.className = "dot";
+    const statusText = document.createElement("span");
+    statusText.className = "ice-status-text";
+    statusText.textContent = "—";
+    status.append(dot, statusText);
+
+    card.append(head, nameField, encSub, encRow1, encRow2,
+                iceSub, iceRow1, mountField, iceRow2, status);
+    list.appendChild(card);
+  });
+  syncMonitorSelect(preferredMonitor);
+  syncOutputsStatus(lastStatus);
+}
+
+/* Селектор «Мониторинг выхода»: авто (макс. битрейт) или конкретный выход —
+   им пользуются подслушка B и анализатор. */
+function syncMonitorSelect(preferred) {
+  const sel = $("monitor_output");
+  if (!sel) return;
+  const keep = preferred !== undefined ? preferred : sel.value;
+  sel.innerHTML = "";
+  const auto = document.createElement("option");
+  auto.value = "";
+  auto.textContent = "Авто — самый высокий битрейт";
+  sel.appendChild(auto);
+  for (const out of outputsState) {
+    const enc = out.encoder || {};
+    const o = document.createElement("option");
+    o.value = out.id;
+    o.textContent = (out.name || out.id) + " · " +
+      String(enc.codec || "aac").toUpperCase() + " " + (enc.bitrate || "?") + "k" +
+      (out.enabled ? "" : " (выкл)");
+    sel.appendChild(o);
+  }
+  sel.value = keep;
+  if (sel.value !== keep) sel.value = ""; // выбранный выход исчез — авто
+}
+
+/* Правки внутри карточек пишутся в outputsState без перерисовки (фокус!);
+   перерисовка — только на структурные изменения (добавить/удалить). */
+$("outputsList").addEventListener("input", (e) => {
+  const t = e.target;
+  if (!t.dataset || !t.dataset.field) return;
+  const card = t.closest(".output-card");
+  if (!card) return;
+  const out = outputsState[Number(card.dataset.idx)];
+  if (!out) return;
+  let value = t.type === "checkbox" ? t.checked : t.value;
+  if (t.dataset.num) value = parseFloat(value);
+  setOutputField(out, t.dataset.field, value);
+  if (t.dataset.field === "enabled") {
+    card.classList.toggle("off", !out.enabled);
+    syncMonitorSelect();
+    syncOutputsStatus(lastStatus);
+  }
+  card.querySelector(".out-title").textContent =
+    outTitleText(out, Number(card.dataset.idx));
+  refreshCommand();
+});
+
+$("outputsList").addEventListener("click", (e) => {
+  const del = e.target.closest(".out-del");
+  if (!del) return;
+  if (outputsState.length <= 1) {
+    toast("Должен остаться хотя бы один выход", true);
+    return;
+  }
+  outputsState.splice(Number(del.closest(".output-card").dataset.idx), 1);
+  renderOutputsEditor($("monitor_output").value);
+  refreshCommand();
+});
+
+$("btnAddOutput").addEventListener("click", () => {
+  const station = selectedStation();
+  const sid = (station && station.id) || currentStationId || "station";
+  let n = outputsState.length + 1;
+  const clash = () =>
+    outputsState.some((o) => o.id === "out-" + n) ||
+    outputsState.some((o) => o.icecast && o.icecast.mount === "/" + sid + "-" + n);
+  while (clash()) n++;
+  outputsState.push(newOutputDefaults(n));
+  renderOutputsEditor($("monitor_output").value);
+  refreshCommand();
+  toast("Выход добавлен — сохраните и перезапустите станцию");
+});
+
+$("monitor_output").addEventListener("change", () => { refreshCommand(); });
 
 /* ---------- labels & disabled sections ---------- */
 
@@ -353,12 +612,36 @@ function syncFallbackState() {
 
 /* ---------- right panel: chain + urls ---------- */
 
+/* Зеркало бэкенда: выход мониторинга — monitor_output, иначе самый
+   высокий битрейт среди включённых. */
+function monitorOutputOf(cfg) {
+  const outs = (cfg.outputs || []).filter((o) => o && o.enabled);
+  if (!outs.length) return null;
+  const wanted = cfg.monitor_output || "";
+  if (wanted) {
+    const found = outs.find((o) => o.id === wanted);
+    if (found) return found;
+  }
+  return outs.reduce((a, b) =>
+    (((b.encoder || {}).bitrate || 0) > ((a.encoder || {}).bitrate || 0) ? b : a));
+}
+
+function outputUrlOfOut(out) {
+  if (!out || !out.icecast) return "";
+  const ice = out.icecast;
+  return "icecast://" + ice.host + ":" + ice.port + "/" +
+    String(ice.mount || "").replace(/^\/+/, "");
+}
+
 function syncChain() {
   const cfg = collectConfig();
   $("rpInput").textContent = cfg.source.url || "—";
-  $("rpOutput").textContent =
-    "icecast://" + cfg.icecast.host + ":" + cfg.icecast.port + "/" +
-    String(cfg.icecast.mount).replace(/^\/+/, "");
+  const enabledOuts = (cfg.outputs || []).filter((o) => o && o.enabled);
+  // «Выход» в Stream Info — тот, что слушаем/анализируем (мониторинг)
+  $("rpOutput").textContent = !enabledOuts.length
+    ? "— (все выходы выключены)"
+    : outputUrlOfOut(monitorOutputOf(cfg)) +
+      (enabledOuts.length > 1 ? "  ·  выходов: " + enabledOuts.length : "");
 
   const chain = $("rpChain");
   chain.innerHTML = "";
@@ -515,9 +798,11 @@ $("stName").addEventListener("click", () => {
 /* ---------- dashboard: карточки потоков ---------- */
 
 function outputUrlOf(st) {
-  const ice = st.icecast || {};
-  return "icecast://" + ice.host + ":" + ice.port + "/" +
-    String(ice.mount || "").replace(/^\/+/, "");
+  // карточка дашборда: выход мониторинга + число остальных включённых
+  const outs = (st.outputs || []).filter((o) => o && o.enabled);
+  if (!outs.length) return "— (выходы выключены)";
+  return outputUrlOfOut(monitorOutputOf(st)) +
+    (outs.length > 1 ? "  ·+" + (outs.length - 1) : "");
 }
 
 function chainStepsOf(cfg) {
@@ -1132,26 +1417,47 @@ function updateSelectedStatus(status) {
   $("btnStart").disabled = !station || running;
   $("btnStop").disabled = !station || !running;
   syncGainLive();
-  syncIcecastStatus(status);
+  lastStatus = status;
+  syncOutputsStatus(status);
 }
 
-/* Статус подключения выхода к Icecast (карточка 07): живой флаг
-   on_connect/on_disconnect воркера, опрашивается со статусом станции. */
-function syncIcecastStatus(status) {
-  const box = $("iceStatus");
-  const text = $("iceStatusText");
-  box.classList.remove("ok", "bad");
-  if (!status || !status.running) {
-    text.textContent = "Подключение к Icecast: воркер остановлен";
-  } else if (status.icecast_connected === true) {
-    box.classList.add("ok");
-    text.textContent = "Подключено к Icecast";
-  } else if (status.icecast_connected === false) {
-    box.classList.add("bad");
-    text.textContent = "Нет подключения к Icecast — воркер повторяет попытки";
-  } else {
-    text.textContent = "Статус подключения неизвестен — перезапустите воркер";
-  }
+/* Статусы подключения выходов к Icecast (секция 06): живые флаги
+   on_connect/on_disconnect воркера по каждому выходу
+   (status.outputs_connected — {id выхода: true/false/None}). */
+let lastStatus = null;
+
+function syncOutputsStatus(status) {
+  document.querySelectorAll("#outputsList .output-card").forEach((card) => {
+    const out = outputsState[Number(card.dataset.idx)];
+    const box = card.querySelector(".ice-status");
+    const text = card.querySelector(".ice-status-text");
+    const headDot = card.querySelector(".head-dot");
+    if (!out || !box || !text) return;
+    card.classList.remove("ok", "bad");
+    box.classList.remove("ok", "bad");
+    if (headDot) headDot.classList.remove("ok", "bad");
+    if (!out.enabled) {
+      text.textContent = "Выход выключен";
+    } else if (!status || !status.running) {
+      text.textContent = "Подключение к Icecast: воркер остановлен";
+    } else {
+      const per = status.outputs_connected || {};
+      const v = per[out.id];
+      if (v === true) {
+        card.classList.add("ok");
+        box.classList.add("ok");
+        if (headDot) headDot.classList.add("ok");
+        text.textContent = "Подключено к Icecast";
+      } else if (v === false) {
+        card.classList.add("bad");
+        box.classList.add("bad");
+        if (headDot) headDot.classList.add("bad");
+        text.textContent = "Нет подключения к Icecast — воркер повторяет попытки";
+      } else {
+        text.textContent = "Статус подключения неизвестен — перезапустите воркер";
+      }
+    }
+  });
 }
 
 /* Живая подстройка (telnet воркера) доступна для работающей станции;
