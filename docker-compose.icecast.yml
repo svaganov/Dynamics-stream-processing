@@ -16,7 +16,10 @@
 
 services:
   icecast:
-    image: moul/icecast:latest   # Icecast 2.4.x
+    # icecast-kh (форк Karl Heyes): в отличие от ванильного 2.4.4, по умолчанию
+    # считает ICY-метаданные UTF-8 — кириллица в StreamTitle уходит слушателям
+    # чистой, без HTML-сущностей (&#1050;...). Image: alpine-сборка kh15.
+    image: aaronghent/alpine-icecast-kh:latest   # Icecast 2.4.0-kh15
     container_name: audio-icecast
     ports:
       - "8801:8000"
