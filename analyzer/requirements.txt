@@ -1,0 +1,11 @@
+# Анализатор (копия Media-stream-analyzer v2) — только runtime-зависимости.
+# Dev-зависимости исходного проекта (pytest, black, mypy, …) не нужны в образе.
+numpy>=1.24.0
+scipy>=1.10.0
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+websockets>=11.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+python-dotenv>=1.0.0
+structlog>=23.0.0

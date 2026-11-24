@@ -14,7 +14,7 @@ RUN apt-get update \
 COPY app/requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app/app.py app/liq.py app/entrypoint.py ./
+COPY app/app.py app/liq.py app/metadata_relay.py app/entrypoint.py ./
 COPY app/static ./static
 
 # Контекст сборки образа воркера — зашит в образ панели, entrypoint

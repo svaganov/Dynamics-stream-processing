@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Stream Media Analyzer</title>
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body class="landing-page">
+
+  <header class="landing-header">
+    <h1>Stream Media Analyzer</h1>
+    <p>Real-time audio & video stream analysis</p>
+  </header>
+
+  <nav class="protocol-grid" role="navigation">
+    <!-- Audio Protocols -->
+    <a href="audio-analyzer.html?protocol=mp3" class="protocol-card" data-protocol="mp3">
+      <span class="protocol-icon">🎵</span>
+      <span class="protocol-name">MP3</span>
+      <span class="protocol-type">Audio</span>
+    </a>
+
+    <a href="audio-analyzer.html?protocol=aac" class="protocol-card" data-protocol="aac">
+      <span class="protocol-icon">🎶</span>
+      <span class="protocol-name">AAC</span>
+      <span class="protocol-type">Audio</span>
+    </a>
+
+    <!-- Video Protocols -->
+    <a href="video-analyzer.html?protocol=srt" class="protocol-card" data-protocol="srt">
+      <span class="protocol-icon">📡</span>
+      <span class="protocol-name">SRT</span>
+      <span class="protocol-type">Video</span>
+    </a>
+
+    <a href="video-analyzer.html?protocol=rtmp" class="protocol-card" data-protocol="rtmp">
+      <span class="protocol-icon">📺</span>
+      <span class="protocol-name">RTMP</span>
+      <span class="protocol-type">Video</span>
+    </a>
+
+    <a href="video-analyzer.html?protocol=mpeg-ts" class="protocol-card" data-protocol="mpeg-ts">
+      <span class="protocol-icon">🎬</span>
+      <span class="protocol-name">MPEG-TS</span>
+      <span class="protocol-type">Video</span>
+    </a>
+
+    <a href="video-analyzer.html?protocol=hls" class="protocol-card" data-protocol="hls">
+      <span class="protocol-icon">🌐</span>
+      <span class="protocol-name">HLS</span>
+      <span class="protocol-type">Video</span>
+    </a>
+  </nav>
+
+  <script>
+    // Keyboard navigation: 1-6 keys
+    document.addEventListener('keydown', (e) => {
+      const cards = document.querySelectorAll('.protocol-card');
+      const key = parseInt(e.key, 10);
+      if (key >= 1 && key <= cards.length) {
+        cards[key - 1].click();
+      }
+    });
+  </script>
+
+</body>
+</html>

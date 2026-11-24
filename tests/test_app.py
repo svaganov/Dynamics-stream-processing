@@ -730,6 +730,30 @@ class PanelApiTest(unittest.TestCase):
         out = panel.containerize_loopback(cfg)
         self.assertEqual(out["fallback"]["url"], "https://cdn.example.com/backup.mp3")
 
+    def test_analyzer_stream_url(self):
+        # Анализатор всегда в контейнере: loopback из конфига — loopback
+        # хоста, переписываем на host.docker.internal
+        cfg = {"icecast": {"host": "127.0.0.1", "port": 9000, "mount": "/test.aacp"}}
+        self.assertEqual(panel._analyzer_stream_url(cfg),
+                         "http://host.docker.internal:9000/test.aacp")
+        cfg = {"icecast": {"host": "localhost", "port": 8800, "mount": "live"}}
+        self.assertEqual(panel._analyzer_stream_url(cfg),
+                         "http://host.docker.internal:8800/live")
+        # реальные адреса (LAN/интернет/host.docker.internal) не трогаем
+        cfg = {"icecast": {"host": "192.168.0.223", "port": 8800, "mount": "/test.aacp"}}
+        self.assertEqual(panel._analyzer_stream_url(cfg),
+                         "http://192.168.0.223:8800/test.aacp")
+        cfg = {"icecast": {"host": "host.docker.internal", "port": 9000, "mount": "/m"}}
+        self.assertEqual(panel._analyzer_stream_url(cfg),
+                         "http://host.docker.internal:9000/m")
+
+    def test_analyzer_container_name_sanitized(self):
+        self.assertEqual(panel._analyzer_container_name("station-1"),
+                         "audio-analyzer-station-1")
+        # недопустимые для имени контейнера символы → дефис
+        self.assertEqual(panel._analyzer_container_name("station 1/x"),
+                         "audio-analyzer-station-1-x")
+
     def test_fallback_normalization(self):
         # неизвестный режим → silence; url-режим без адреса → silence
         st = self.client.put("/api/streams/station-1", json={

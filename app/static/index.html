@@ -132,6 +132,29 @@
   .btn.danger:hover { border-color: var(--red); color: var(--red); }
   header .btn { margin: 8px 0; }
 
+  /* ---------- analyzer modal ---------- */
+  .analyzer-overlay {
+    position: fixed; inset: 0; z-index: 900;
+    background: rgba(6, 10, 15, 0.75);
+    display: none; align-items: stretch; justify-content: center;
+    padding: 24px;
+  }
+  .analyzer-overlay.open { display: flex; }
+  .analyzer-modal {
+    flex: 1; max-width: 1500px;
+    display: flex; flex-direction: column;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--radius-lg, 10px); overflow: hidden;
+  }
+  .analyzer-bar {
+    flex: none; display: flex; align-items: center; gap: 12px;
+    padding: 8px 12px; border-bottom: 1px solid var(--border);
+    background: var(--panel-2);
+  }
+  .analyzer-bar .title { font-size: 12.5px; font-weight: 600; letter-spacing: 0.04em; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .analyzer-frame { flex: 1; border: 0; background: #0a0a0f; }
+  .rp-analyzer-btn { margin: 6px 16px 10px; width: calc(100% - 32px); }
+
   /* ---------- layout: center + right ---------- */
   .layout {
     display: grid;
@@ -936,6 +959,8 @@
     <div class="rp-row"><span class="k">Рестартов</span><span class="v mono" id="rpRestarts">0</span></div>
     <div class="rp-row"><span class="k">Воркер</span><span class="v mono" id="rpFfmpeg">—</span></div>
 
+    <button class="btn rp-analyzer-btn" id="btnAnalyzer" title="Запустить контейнер-анализатор выходного потока (dBFS, LUFS, спектр — Media-stream-analyzer v2)">📊 Анализ уровня и громкости</button>
+
     <div class="rp-section-label">Вход</div>
     <div class="rp-row"><span class="v mono" id="rpInput" style="text-align:left">—</span></div>
 
@@ -954,9 +979,20 @@
   EQ, усиление, компрессор и лимитер подстраиваются живьём на работающем воркере; включение/выключение всех секций (включая loudnorm) — тоже живьём, параметры loudnorm — при перезапуске. Реестр станций хранится в <code>streams.json</code> рядом с <code>app.py</code>.
 </footer>
 
+<div class="analyzer-overlay" id="analyzerOverlay">
+  <div class="analyzer-modal">
+    <div class="analyzer-bar">
+      <span class="title" id="analyzerTitle">Анализ уровня и громкости</span>
+      <button class="btn" id="btnAnalyzerTab" title="Открыть анализатор в новой вкладке браузера">↗ Вкладка</button>
+      <button class="btn danger" id="btnAnalyzerStop" title="Остановить контейнер-анализатор и закрыть окно">■ Остановить анализатор</button>
+    </div>
+    <iframe class="analyzer-frame" id="analyzerFrame" src="about:blank"></iframe>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
-<script src="/static/app.js?v=5"></script>
+<script src="/static/app.js?v=6"></script>
 <script type="text/plain" id="legacyInlineScript">
 "use strict";
 

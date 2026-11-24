@@ -1047,6 +1047,57 @@ async function toggleCardListen(stationId, which) {
 $("btnListenInput").addEventListener("click", () => toggleListen("input"));
 $("btnListenOutput").addEventListener("click", () => toggleListen("output"));
 $("btnListenStop").addEventListener("click", stopListen);
+
+/* ---------- Анализ уровня и громкости (контейнер Media-stream-analyzer v2) ----------
+   Кнопка в Stream Info поднимает контейнер-анализатор выходного потока
+   станции и открывает его UI в модальном окне; «Остановить анализатор»
+   закрывает окно и снимает контейнер. */
+let analyzerUrl = null;
+
+async function openAnalyzer() {
+  const station = selectedStation();
+  if (!station) { toast("Сначала выберите поток", true); return; }
+  const btn = $("btnAnalyzer");
+  btn.disabled = true;
+  try {
+    const res = await fetch("/api/streams/" + encodeURIComponent(station.id) +
+      "/analyzer/start", { method: "POST" });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      toast("Анализатор не запустился: " + (data.error || res.status), true);
+      return;
+    }
+    analyzerUrl = data.url;
+    $("analyzerTitle").textContent =
+      "Анализ уровня и громкости — " + (station.name || station.id);
+    $("analyzerFrame").src = analyzerUrl;
+    $("analyzerOverlay").classList.add("open");
+  } catch (e) {
+    toast("Анализатор не запустился: " + (e && e.message), true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function closeAnalyzer() {
+  $("analyzerOverlay").classList.remove("open");
+  $("analyzerFrame").src = "about:blank";
+  analyzerUrl = null;
+  const station = selectedStation();
+  if (station) {
+    try {
+      await fetch("/api/streams/" + encodeURIComponent(station.id) +
+        "/analyzer/stop", { method: "POST" });
+    } catch (e) { /* контейнер добьёт очистка при удалении станции */ }
+  }
+  toast("Анализатор остановлен");
+}
+
+$("btnAnalyzer").addEventListener("click", openAnalyzer);
+$("btnAnalyzerStop").addEventListener("click", closeAnalyzer);
+$("btnAnalyzerTab").addEventListener("click", () => {
+  if (analyzerUrl) window.open(analyzerUrl, "_blank");
+});
 audio.addEventListener("error", () => {
   // Событие от устаревшего/самого остановленного потока — не ошибка эфира.
   if (listening && listenGeneration > 0) {

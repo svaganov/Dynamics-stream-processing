@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Audio Analyzer — Stream Media Analyzer</title>
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body class="analyzer-page analyzer-page--noheader">
+
+  <!-- BODY -->
+  <div class="analyzer-body" style="display: grid; grid-template-columns: 1fr; overflow: hidden;">
+
+    <!-- CENTER PANEL -->
+    <main class="center-panel" style="padding: 16px; overflow-y: auto;">
+
+      <!-- Connection Form -->
+      <div class="connect-label" style="font-size:12px;color:var(--text-secondary);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;">Stream URL link</div>
+      <div class="connect-form" id="connect-form">
+        <span class="status-dot disconnected" id="status-dot" title="Connection status"></span>
+        <input type="text" id="connect-url" value="" placeholder="http://example.com:8000/stream.mp3, .aac, .m3u8, ...">
+        <input type="number" id="connect-buffer" value="300" min="50" max="5000" placeholder="Buffer ms">
+        <button id="btn-connect">Connect</button>
+        <button class="disconnect" id="btn-disconnect">Disconnect</button>
+      </div>
+
+      <!-- Audio Layout -->
+      <div class="srt-layout">
+
+        <!-- LEFT COLUMN: Metadata + Technical Data -->
+        <div class="left-column">
+
+          <!-- Preview -->
+          <div class="panel-title">Preview</div>
+          <div class="preview-card">
+            <button class="preview-play-btn" id="preview-play-btn" type="button" aria-label="Play stream preview" disabled>
+              <span class="preview-icon preview-icon--play" id="preview-icon">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+                  <path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>
+                  <path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path>
+                </svg>
+              </span>
+              <span class="preview-label" id="preview-label">Listen</span>
+            </button>
+            <audio id="preview-audio" preload="none" crossorigin="anonymous"></audio>
+          </div>
+
+          <!-- Stream Metadata -->
+          <div class="panel-title">Stream Metadata</div>
+          <div class="tech-data">
+            <div class="tech-item"><div class="tech-label">Title</div><div class="tech-value" id="meta-title">Unknown Title</div></div>
+            <div class="tech-item"><div class="tech-label">Artist</div><div class="tech-value" id="meta-artist">Unknown Artist</div></div>
+            <div class="tech-item"><div class="tech-label">Album</div><div class="tech-value" id="meta-album">—</div></div>
+            <div class="tech-item"><div class="tech-label">Year</div><div class="tech-value" id="meta-year">—</div></div>
+            <div class="tech-item"><div class="tech-label">Genre</div><div class="tech-value" id="meta-genre">—</div></div>
+            <div class="tech-item"><div class="tech-label">Comment</div><div class="tech-value" id="meta-comment">—</div></div>
+            <div class="tech-item"><div class="tech-label">Station</div><div class="tech-value" id="meta-station">—</div></div>
+            <div class="tech-item"><div class="tech-label">ICY Name</div><div class="tech-value" id="meta-icy">—</div></div>
+          </div>
+
+          <!-- Technical Data -->
+          <div class="panel-title" style="margin-top:12px">Technical Data</div>
+          <div class="tech-data">
+            <div class="tech-item"><div class="tech-label">Audio Codec</div><div class="tech-value" id="tech-codec">MP3</div></div>
+            <div class="tech-item"><div class="tech-label">Profile</div><div class="tech-value" id="tech-profile">—</div></div>
+            <div class="tech-item"><div class="tech-label">Channels</div><div class="tech-value" id="tech-channels">2 (Stereo)</div></div>
+            <div class="tech-item"><div class="tech-label">Bitrate</div><div class="tech-value" id="tech-bitrate">320 kbps</div></div>
+            <div class="tech-item"><div class="tech-label">Samplerate</div><div class="tech-value" id="tech-samplerate">48 kHz</div></div>
+            <div class="tech-item"><div class="tech-label">Bitrate Mode</div><div class="tech-value" id="tech-mode">CBR</div></div>
+          </div>
+
+          <!-- Bandwidth Chart -->
+          <div class="panel-title" style="margin-top:12px">Bandwidth</div>
+          <div class="srt-chart-card">
+            <div class="srt-chart-header">
+              <div class="srt-chart-title">Network Throughput (kbps)</div>
+              <div class="time-window-selector" id="network-time-selector">
+                <button class="time-btn" data-window="60">1m</button>
+                <button class="time-btn active" data-window="300">5m</button>
+                <button class="time-btn" data-window="900">15m</button>
+                <button class="time-btn" data-window="1800">30m</button>
+                <button class="time-btn" data-window="3600">60m</button>
+              </div>
+            </div>
+            <canvas class="srt-chart-canvas network-throughput-canvas" id="bwChart"></canvas>
+          </div>
+
+        </div>
+
+        <!-- RIGHT COLUMN: Audio -->
+        <div class="right-column">
+
+          <div class="audio-meters-row">
+            <div class="audio-meter-col">
+              <!-- DBFS Meter -->
+              <div class="panel-title">DBFS (Digital Peak)</div>
+              <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:16px;display:flex;flex-direction:column;align-items:center;flex:1;">
+                <div class="dbfs-meters">
+                  <!-- LEFT -->
+                  <div class="dbfs-meter">
+                    <div class="dbfs-meter__label">LEFT</div>
+                    <div class="dbfs-meter__body">
+                      <div class="dbfs-meter__ticks-panel">
+                        <div class="tick tick-0"><div class="tick__line"></div><div class="tick__number" style="color:var(--meter-red);font-weight:bold;">0</div></div>
+                        <div class="tick tick-2"><div class="tick__line"></div><div class="tick__number" style="color:var(--meter-red);font-weight:bold;">2</div></div>
+                        <div class="tick tick-9"><div class="tick__line"></div><div class="tick__number" style="color:var(--meter-yellow);font-weight:bold;">9</div></div>
+                        <div class="tick tick-18"><div class="tick__line"></div><div class="tick__number" style="color:var(--meter-yellow);font-weight:bold;">18</div></div>
+                        <div class="tick tick-20"><div class="tick__line"></div><div class="tick__number">20</div></div>
+                        <div class="tick tick-30"><div class="tick__line"></div><div class="tick__number">30</div></div>
+                        <div class="tick tick-40"><div class="tick__line"></div><div class="tick__number">40</div></div>
+                        <div class="tick tick-50"><div class="tick__line"></div><div class="tick__number">50</div></div>
+                        <div class="tick tick-60"><div class="tick__line"></div><div class="tick__number">60</div></div>
+                        <div class="tick tick-70"><div class="tick__line"></div><div class="tick__number">70</div></div>
+                      </div>
+                      <div class="dbfs-meter__scale">
+                        <div class="dbfs-meter__zones">
+                          <div class="zone zone--red"></div>
+                          <div class="zone zone--orange"></div>
+                          <div class="zone zone--yellow"></div>
+                          <div class="zone zone--green"></div>
+                        </div>
+                        <div class="dbfs-meter__bar-container" id="dbfsBarContainerL">
+                          <div class="seg seg--green"></div>
+                          <div class="seg seg--yellow"></div>
+                          <div class="seg seg--orange"></div>
+                          <div class="seg seg--red"></div>
+                        </div>
+                        <div class="dbfs-meter__peak" id="dbfsPeakL" style="bottom:249px;"></div>
+                      </div>
+                    </div>
+                  </div>
+                  <!-- RIGHT -->
+                  <div class="dbfs-meter">
+                    <div class="dbfs-meter__label">RIGHT</div>
+                    <div class="dbfs-meter__body">
+                      <div class="dbfs-meter__scale">
+                        <div class="dbfs-meter__zones">
+                          <div class="zone zone--red"></div>
+                          <div class="zone zone--orange"></div>
+                          <div class="zone zone--yellow"></div>
+                          <div class="zone zone--green"></div>
+                        </div>
+                        <div class="dbfs-meter__bar-container" id="dbfsBarContainerR">
+                          <div class="seg seg--green"></div>
+                          <div class="seg seg--yellow"></div>
+                          <div class="seg seg--orange"></div>
+                          <div class="seg seg--red"></div>
+                        </div>
+                        <div class="dbfs-meter__peak" id="dbfsPeakR" style="bottom:249px;"></div>
+                      </div>
+                      <div class="dbfs-meter__ticks-panel dbfs-meter__ticks-panel--right">
+                        <div class="tick tick-0 tick--right"><div class="tick__line"></div><div class="tick__number" style="color:var(--meter-red);font-weight:bold;">0</div></div>
+                        <div class="tick tick-2 tick--right"><div class="tick__line"></div><div class="tick__number" style="color:var(--meter-red);font-weight:bold;">2</div></div>
+                        <div class="tick tick-9 tick--right"><div class="tick__line"></div><div class="tick__number" style="color:var(--meter-yellow);font-weight:bold;">9</div></div>
+                        <div class="tick tick-18 tick--right"><div class="tick__line"></div><div class="tick__number" style="color:var(--meter-yellow);font-weight:bold;">18</div></div>
+                        <div class="tick tick-20 tick--right"><div class="tick__line"></div><div class="tick__number">20</div></div>
+                        <div class="tick tick-30 tick--right"><div class="tick__line"></div><div class="tick__number">30</div></div>
+                        <div class="tick tick-40 tick--right"><div class="tick__line"></div><div class="tick__number">40</div></div>
+                        <div class="tick tick-50 tick--right"><div class="tick__line"></div><div class="tick__number">50</div></div>
+                        <div class="tick tick-60 tick--right"><div class="tick__line"></div><div class="tick__number">60</div></div>
+                        <div class="tick tick-70 tick--right"><div class="tick__line"></div><div class="tick__number">70</div></div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div class="dbfs-readouts">
+                  <div class="dbfs-readouts__column">
+                    <div class="dbfs-readout">
+                      <div class="dbfs-readout__label">L</div>
+                      <div class="dbfs-readout__value dbfs-readout__value--danger" id="dbfsValL">-1.0</div>
+                      <div class="dbfs-readout__value dbfs-readout__value--danger">dBFS</div>
+                    </div>
+                    <div class="dbfs-readout">
+                      <div class="dbfs-readout__label">PEAK HOLD L</div>
+                      <div class="dbfs-readout__value dbfs-readout__value--danger" id="peakHoldL">-1.0</div>
+                      <div class="dbfs-readout__value dbfs-readout__value--danger">dBFS</div>
+                    </div>
+                  </div>
+                  <div class="dbfs-readouts__column">
+                    <div class="dbfs-readout">
+                      <div class="dbfs-readout__label">R</div>
+                      <div class="dbfs-readout__value dbfs-readout__value--danger" id="dbfsValR">-1.5</div>
+                      <div class="dbfs-readout__value dbfs-readout__value--danger">dBFS</div>
+                    </div>
+                    <div class="dbfs-readout">
+                      <div class="dbfs-readout__label">PEAK HOLD R</div>
+                      <div class="dbfs-readout__value dbfs-readout__value--danger" id="peakHoldR">-1.0</div>
+                      <div class="dbfs-readout__value dbfs-readout__value--danger">dBFS</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="audio-meter-col">
+              <!-- LUFS Meter -->
+              <div class="panel-title">LUFS Meter — EBU R128</div>
+              <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:16px;display:flex;flex-direction:column;align-items:center;flex:1;">
+                <div class="lufs-meters">
+                  <!-- M (Momentary) -->
+                  <div class="lufs-meter">
+                    <div class="lufs-meter__label" style="text-align:center;width:104px;">M</div>
+                    <div class="lufs-meter__body">
+                      <div class="lufs-meter__ticks-panel">
+                        <div class="lufs-tick lufs-tick-0"><div class="lufs-tick__line"></div><div class="lufs-tick__number" style="color:var(--meter-red);font-weight:bold;">0</div></div>
+                        <div class="lufs-tick lufs-tick-5"><div class="lufs-tick__line"></div><div class="lufs-tick__number" style="color:var(--meter-red);font-weight:bold;">5</div></div>
+                        <div class="lufs-tick lufs-tick-10"><div class="lufs-tick__line"></div><div class="lufs-tick__number" style="color:var(--meter-red);font-weight:bold;">10</div></div>
+                        <div class="lufs-tick lufs-tick-15"><div class="lufs-tick__line"></div><div class="lufs-tick__number" style="color:var(--meter-red);font-weight:bold;">15</div></div>
+                        <div class="lufs-tick lufs-tick-20"><div class="lufs-tick__line"></div><div class="lufs-tick__number" style="color:var(--meter-red);font-weight:bold;">20</div></div>
+                        <div class="lufs-tick lufs-tick-23"><div class="lufs-tick__line"></div><div class="lufs-tick__number" style="color:var(--meter-yellow);font-weight:bold;">23</div></div>
+                        <div class="lufs-tick lufs-tick-26"><div class="lufs-tick__line"></div><div class="lufs-tick__number" style="color:var(--meter-yellow);font-weight:bold;">26</div></div>
+                        <div class="lufs-tick lufs-tick-30"><div class="lufs-tick__line"></div><div class="lufs-tick__number">30</div></div>
+                        <div class="lufs-tick lufs-tick-40"><div class="lufs-tick__line"></div><div class="lufs-tick__number">40</div></div>
+                      </div>
+                      <div class="lufs-meter__scale">
+                        <div class="lufs-meter__zones">
+                          <div class="lufs-zone lufs-zone--red"></div>
+                          <div class="lufs-zone lufs-zone--yellow"></div>
+                          <div class="lufs-zone lufs-zone--green"></div>
+                        </div>
+                        <div class="lufs-meter__bar-container" id="lufsBarContainerM">
+                          <div class="lufs-seg lufs-seg--green"></div>
+                          <div class="lufs-seg lufs-seg--yellow"></div>
+                          <div class="lufs-seg lufs-seg--red"></div>
+                        </div>
+                        <div class="lufs-meter__peak" id="lufsPeakM" style="bottom:249px;"></div>
+                        <div class="lufs-meter__tp-line" id="lufsTpLineM" style="bottom:230px;"></div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- S (Short-term) -->
+                  <div class="lufs-meter">
+                    <div class="lufs-meter__label" style="text-align:center;width:104px;">S</div>
+                    <div class="lufs-meter__body">
+                      <div class="lufs-meter__ticks-panel">
+                        <div class="lufs-tick lufs-tick-0"><div class="lufs-tick__line"></div><div class="lufs-tick__number" style="color:var(--meter-red);font-weight:bold;">0</div></div>
+                        <div class="lufs-tick lufs-tick-5"><div class="lufs-tick__line"></div><div class="lufs-tick__number" style="color:var(--meter-red);font-weight:bold;">5</div></div>
+                        <div class="lufs-tick lufs-tick-10"><div class="lufs-tick__line"></div><div class="lufs-tick__number" style="color:var(--meter-red);font-weight:bold;">10</div></div>
+                        <div class="lufs-tick lufs-tick-15"><div class="lufs-tick__line"></div><div class="lufs-tick__number" style="color:var(--meter-red);font-weight:bold;">15</div></div>
+                        <div class="lufs-tick lufs-tick-20"><div class="lufs-tick__line"></div><div class="lufs-tick__number" style="color:var(--meter-red);font-weight:bold;">20</div></div>
+                        <div class="lufs-tick lufs-tick-23"><div class="lufs-tick__line"></div><div class="lufs-tick__number" style="color:var(--meter-yellow);font-weight:bold;">23</div></div>
+                        <div class="lufs-tick lufs-tick-26"><div class="lufs-tick__line"></div><div class="lufs-tick__number" style="color:var(--meter-yellow);font-weight:bold;">26</div></div>
+                        <div class="lufs-tick lufs-tick-30"><div class="lufs-tick__line"></div><div class="lufs-tick__number">30</div></div>
+                        <div class="lufs-tick lufs-tick-40"><div class="lufs-tick__line"></div><div class="lufs-tick__number">40</div></div>
+                      </div>
+                      <div class="lufs-meter__scale">
+                        <div class="lufs-meter__zones">
+                          <div class="lufs-zone lufs-zone--red"></div>
+                          <div class="lufs-zone lufs-zone--yellow"></div>
+                          <div class="lufs-zone lufs-zone--green"></div>
+                        </div>
+                        <div class="lufs-meter__bar-container" id="lufsBarContainerS">
+                          <div class="lufs-seg lufs-seg--green"></div>
+                          <div class="lufs-seg lufs-seg--yellow"></div>
+                          <div class="lufs-seg lufs-seg--red"></div>
+                        </div>
+                        <div class="lufs-meter__peak" id="lufsPeakS" style="bottom:249px;"></div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- I (Integrated) -->
+                  <div class="lufs-meter">
+                    <div class="lufs-meter__label" style="text-align:center;width:104px;">I</div>
+                    <div class="lufs-meter__body">
+                      <div class="lufs-meter__ticks-panel">
+                        <div class="lufs-tick lufs-tick-0"><div class="lufs-tick__line"></div><div class="lufs-tick__number" style="color:var(--meter-red);font-weight:bold;">0</div></div>
+                        <div class="lufs-tick lufs-tick-5"><div class="lufs-tick__line"></div><div class="lufs-tick__number" style="color:var(--meter-red);font-weight:bold;">5</div></div>
+                        <div class="lufs-tick lufs-tick-10"><div class="lufs-tick__line"></div><div class="lufs-tick__number" style="color:var(--meter-red);font-weight:bold;">10</div></div>
+                        <div class="lufs-tick lufs-tick-15"><div class="lufs-tick__line"></div><div class="lufs-tick__number" style="color:var(--meter-red);font-weight:bold;">15</div></div>
+                        <div class="lufs-tick lufs-tick-20"><div class="lufs-tick__line"></div><div class="lufs-tick__number" style="color:var(--meter-red);font-weight:bold;">20</div></div>
+                        <div class="lufs-tick lufs-tick-23"><div class="lufs-tick__line"></div><div class="lufs-tick__number" style="color:var(--meter-yellow);font-weight:bold;">23</div></div>
+                        <div class="lufs-tick lufs-tick-26"><div class="lufs-tick__line"></div><div class="lufs-tick__number" style="color:var(--meter-yellow);font-weight:bold;">26</div></div>
+                        <div class="lufs-tick lufs-tick-30"><div class="lufs-tick__line"></div><div class="lufs-tick__number">30</div></div>
+                        <div class="lufs-tick lufs-tick-40"><div class="lufs-tick__line"></div><div class="lufs-tick__number">40</div></div>
+                      </div>
+                      <div class="lufs-meter__scale">
+                        <div class="lufs-meter__zones">
+                          <div class="lufs-zone lufs-zone--red"></div>
+                          <div class="lufs-zone lufs-zone--yellow"></div>
+                          <div class="lufs-zone lufs-zone--green"></div>
+                        </div>
+                        <div class="lufs-meter__bar-container" id="lufsBarContainerI">
+                          <div class="lufs-seg lufs-seg--green"></div>
+                          <div class="lufs-seg lufs-seg--yellow"></div>
+                          <div class="lufs-seg lufs-seg--red"></div>
+                        </div>
+                        <div class="lufs-meter__peak" id="lufsPeakI" style="bottom:249px;"></div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div class="lufs-readouts">
+                  <div class="lufs-readouts__column">
+                    <div class="lufs-readout">
+                      <div class="lufs-readout__label">M</div>
+                      <div class="lufs-readout__value lufs-readout__value--warning" id="lufsValM">-23.5</div>
+                      <div class="lufs-readout__value lufs-readout__value--warning">LUFS</div>
+                    </div>
+                    <div class="lufs-readout">
+                      <div class="lufs-readout__label">TP</div>
+                      <div class="lufs-readout__value lufs-readout__value--danger" id="tpValM">-1.0</div>
+                      <div class="lufs-readout__value lufs-readout__value--danger">dBTP</div>
+                    </div>
+                  </div>
+                  <div class="lufs-readouts__column">
+                    <div class="lufs-readout">
+                      <div class="lufs-readout__label">S</div>
+                      <div class="lufs-readout__value lufs-readout__value--safe" id="lufsValS">-24.2</div>
+                      <div class="lufs-readout__value lufs-readout__value--safe">LUFS</div>
+                    </div>
+                    <div class="lufs-readout">
+                      <div class="lufs-readout__label">LRA</div>
+                      <div class="lufs-readout__value lufs-readout__value--safe" id="lraVal">4.1</div>
+                      <div class="lufs-readout__value lufs-readout__value--safe">LU</div>
+                    </div>
+                  </div>
+                  <div class="lufs-readouts__column">
+                    <div class="lufs-readout">
+                      <div class="lufs-readout__label">I</div>
+                      <div class="lufs-readout__value lufs-readout__value--safe" id="lufsValI">-25.8</div>
+                      <div class="lufs-readout__value lufs-readout__value--safe">LUFS</div>
+                    </div>
+                    <div class="lufs-readout" style="visibility:hidden;">
+                      <div class="lufs-readout__label">&nbsp;</div>
+                      <div class="lufs-readout__value">&nbsp;</div>
+                      <div class="lufs-readout__value">&nbsp;</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Loudness History -->
+          <div class="history-section" style="margin-top:12px">
+            <div class="srt-chart-header">
+              <div class="srt-chart-title">Loudness History (LUFS)</div>
+              <div class="time-window-selector" id="history-time-selector">
+                <button class="time-btn" data-window="60">1m</button>
+                <button class="time-btn active" data-window="300">5m</button>
+                <button class="time-btn" data-window="900">15m</button>
+                <button class="time-btn" data-window="1800">30m</button>
+                <button class="time-btn" data-window="3600">60m</button>
+              </div>
+            </div>
+            <canvas class="history-canvas" id="historyCanvas"></canvas>
+          </div>
+
+        </div>
+      </div>
+    </main>
+
+  </div>
+
+  <script src="js/app.js"></script>
+  <script>
+    initAnalyzer({ type: 'audio' });
+  </script>
+
+</body>
+</html>

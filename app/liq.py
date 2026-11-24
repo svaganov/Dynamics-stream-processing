@@ -474,6 +474,21 @@ def generate_liq_script(cfg):
         'ice_connected = interactive.bool("panel_ice_connected", false)',
         'ice_connected_ref = interactive.bool.ref("panel_ice_connected")',
         "",
+        # Живой StreamTitle: Liquidsoap (input.http на базе ffmpeg) не читает
+        # in-stream ICY-блоки источника, поэтому панельный релей
+        # metadata_relay вставляет тег через telnet «panel.set_title
+        # <url-encoded>», а output.icecast рассылает его слушателям штатным
+        # ICY-обновлением — работает с любой версией Icecast, в отличие от
+        # admin API (Icecast 2.5 кладёт updinfo в x_icy_title, не в эфир).
+        "# Команда «panel.set_title <url-encoded>»: вставка StreamTitle "
+        "от панельного релея metadata_relay",
+        "def panel_set_title(t) =",
+        '  s.insert_metadata(new_track=false, [("title", url.decode(t))])',
+        '  "ok"',
+        "end",
+        'server.register(namespace="panel", '
+        'description="Set StreamTitle (url-encoded)", "set_title", panel_set_title)',
+        "",
         "output.icecast(",
         '  id="icecast",',
         '  host="{host}",'.format(host=_liq_string(ice.get("host", "127.0.0.1"))),

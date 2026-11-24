@@ -57,11 +57,22 @@ _PANEL_INSIDE_CONTAINER = os.path.exists("/.dockerenv") or os.path.exists("/run/
 WORKER_NETWORK = os.environ.get("WORKER_NETWORK", "audiopanel_net")
 WORKER_VOLUME = os.environ.get("WORKER_VOLUME", "panel-data")
 
+# Контейнер-анализатор (Media-stream-analyzer v2) — запускается по кнопке
+# «Анализ уровня и громкости» и смотрит выходной поток станции. Образ —
+# производный от локальной сборки анализатора, см. analyzer/Dockerfile.
+ANALYZER_IMAGE = os.environ.get("ANALYZER_IMAGE", "audio-analyzer:2.0-panel")
+ANALYZER_PORT = 8765
+
 import importlib.util as _ilu
 
 _liq_spec = _ilu.spec_from_file_location("panel_liq", os.path.join(BASE_DIR, "liq.py"))
 liq = _ilu.module_from_spec(_liq_spec)
 _liq_spec.loader.exec_module(liq)
+
+_relay_spec = _ilu.spec_from_file_location(
+    "panel_metadata_relay", os.path.join(BASE_DIR, "metadata_relay.py"))
+metadata_relay = _ilu.module_from_spec(_relay_spec)
+_relay_spec.loader.exec_module(metadata_relay)
 
 # --------------------------------------------------------------------------
 # Шаблон станции. Движок запуска не привязан к этой модели: на этапе 2
@@ -576,8 +587,10 @@ class DockerWorkerManager:
     """Менеджер станции: один Docker-контейнер с Liquidsoap-воркером на станцию.
 
     Контракт: start/stop/restart/status/logs (+ dispose для остановки фоновых
-    потоков). Метаданные ICY идут сквозь Liquidsoap natively — отдельный
-    релей не нужен.
+    потоков). StreamTitle источника Liquidsoap сквозь себя не пропускает
+    (input.http на базе ffmpeg не читает in-stream ICY-блоки), поэтому
+    метаданные доставляет панельный релей metadata_relay.MetadataRelay
+    через telnet-команду воркера «panel.set_title».
     """
 
     def __init__(self, station_id):
@@ -594,6 +607,7 @@ class DockerWorkerManager:
         self.next_log_id = 1
         self._run_cfg = None
         self._client = None
+        self._relay = None
         # Постоянная telnet-сессия опроса флага подключения выхода: без неё
         # каждый опрос статуса (2 с) порождал пару «New client / disconnected»
         # в логе воркера и вымывал из него полезные строки.
@@ -736,13 +750,35 @@ class DockerWorkerManager:
             if line.strip() and not line.startswith("#"):
                 self.log("[panel]   " + line)
         threading.Thread(target=self._follow_logs, args=(container,), daemon=True).start()
+        self._start_relay(cfg)
         return True, "запущен ({})".format(self.container_name)
+
+    def _start_relay(self, cfg):
+        """Релей StreamTitle источника -> telnet воркера (см. metadata_relay)."""
+        self._stop_relay()
+        run_cfg = containerize_loopback(cfg)
+        source_url = str((run_cfg.get("source") or {}).get("url") or "").strip()
+        if not source_url:
+            return
+        relay = metadata_relay.MetadataRelay(
+            self.station_id, source_url, self.telnet_host_port, self.log)
+        relay.start()
+        with self.lock:
+            self._relay = relay
+
+    def _stop_relay(self):
+        with self.lock:
+            relay = self._relay
+            self._relay = None
+        if relay is not None:
+            relay.stop()
 
     def stop(self):
         with self.lock:
             self.manual_stop = True
             container = self.container
         self._ice_sess_close()
+        self._stop_relay()
         if container is None or not self._is_running(container):
             return False, "процесс не запущен"
         self.log("[panel] остановка воркера {}...".format(self.container_name))
@@ -1224,6 +1260,7 @@ def stop_and_forget_station(station_id):
         else:
             manager.stop()
     stop_listeners(station_id)
+    stop_analyzer(station_id)
 
 
 # A/B-прослушки отделены от основного pipeline: они живут, пока клиент слушает
@@ -1267,6 +1304,140 @@ def stop_listeners(station_id):
             proc.wait(timeout=2)
         except (OSError, subprocess.SubprocessError):
             pass
+
+
+# ------------------------------------------------------------- analyzer ---
+# Контейнер-анализатор (Media-stream-analyzer v2): поднимается по кнопке
+# «Анализ уровня и громкости», декодирует выходной поток станции и рисует
+# dBFS/LUFS/спектр в собственном UI. Живёт, пока пользователь не нажмёт
+# «Остановить анализатор»; принудительно снимается при удалении станции.
+
+
+def _analyzer_container_name(station_id):
+    return "audio-analyzer-" + re.sub(r"[^A-Za-z0-9_.-]", "-", station_id)
+
+
+def _analyzer_stream_url(cfg):
+    """URL выходного потока с точки зрения контейнера анализатора.
+
+    Анализатор всегда в контейнере: loopback из конфига — это loopback
+    хоста, поэтому переписываем на host.docker.internal (контейнеру
+    добавляется extra_hosts host-gateway). Реальные адреса не трогаем."""
+    ice = cfg["icecast"]
+    host = str(ice["host"])
+    if host.lower() in LOOPBACK_HOSTS:
+        host = "host.docker.internal"
+    return "http://{}:{}/{}".format(
+        host, ice["port"], str(ice["mount"]).lstrip("/"))
+
+
+def analyzer_state(station_id):
+    """(running, host_port) контейнера анализатора станции."""
+    try:
+        import docker
+        client = docker.from_env()
+        name = _analyzer_container_name(station_id)
+        for container in client.containers.list(all=True, filters={"name": name}):
+            if container.name != name:
+                continue
+            container.reload()
+            if container.status != "running":
+                return False, None
+            ports = container.attrs["NetworkSettings"]["Ports"]
+            binding = ports.get("{}/tcp".format(ANALYZER_PORT))
+            return True, int(binding[0]["HostPort"]) if binding else None
+        return False, None
+    except Exception:
+        return False, None
+
+
+def _analyzer_health_url(station_id, host_port):
+    """URL health-чека анализатора с точки зрения панели."""
+    if _PANEL_INSIDE_CONTAINER:
+        # общая docker-сеть: стучимся по имени контейнера
+        return "http://{}:{}/api/health".format(
+            _analyzer_container_name(station_id), ANALYZER_PORT)
+    return "http://127.0.0.1:{}/api/health".format(host_port)
+
+
+def _wait_analyzer_ready(health_url, timeout=10.0):
+    """Ждёт, пока HTTP-сервер анализатора начнёт отвечать (uvicorn грузится
+    1–3 с после старта контейнера; без этого окно открывается в мёртвый порт)."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            import urllib.request
+            with urllib.request.urlopen(health_url, timeout=1.5) as resp:
+                if resp.status == 200:
+                    return True
+        except Exception:
+            time.sleep(0.3)
+    return False
+
+
+def start_analyzer(station_id, cfg):
+    """Запускает контейнер анализатора выхода станции.
+
+    Возвращает (ok, message, page_url): page_url — страница анализатора
+    с автоподключением к выходному потоку (?url=)."""
+    try:
+        import docker
+        client = docker.from_env()
+    except ImportError:
+        return False, "docker SDK не установлен (pip install docker)", None
+    except Exception as exc:
+        return False, "демон Docker недоступен: {}".format(exc), None
+    try:
+        client.images.get(ANALYZER_IMAGE)
+    except Exception:
+        return False, ("образ {} не собран: соберите его командой "
+                       "«docker build -f analyzer/Dockerfile -t {} .» "
+                       "из корня репозитория"
+                       .format(ANALYZER_IMAGE, ANALYZER_IMAGE)), None
+    name = _analyzer_container_name(station_id)
+    try:
+        for old in client.containers.list(all=True, filters={"name": name}):
+            if old.name == name:
+                old.remove(force=True)
+        kwargs = dict(
+            name=name,
+            detach=True,
+            labels={"audio-panel": "1", "audio-panel.analyzer": station_id},
+            extra_hosts={"host.docker.internal": "host-gateway"},
+            # UI и WebSocket анализатора — только с loopback хоста
+            ports={"{}/tcp".format(ANALYZER_PORT): ("127.0.0.1", None)},
+        )
+        if _PANEL_INSIDE_CONTAINER:
+            kwargs["network"] = WORKER_NETWORK
+        container = client.containers.run(ANALYZER_IMAGE, **kwargs)
+        container.reload()
+        binding = container.attrs["NetworkSettings"]["Ports"].get(
+            "{}/tcp".format(ANALYZER_PORT))
+        if not binding:
+            raise RuntimeError("порт анализатора не опубликован")
+        host_port = int(binding[0]["HostPort"])
+        if not _wait_analyzer_ready(
+                _analyzer_health_url(station_id, host_port)):
+            container.remove(force=True)
+            return False, "анализатор не ответил после запуска (см. логи контейнера {})".format(name), None
+        page_url = "http://127.0.0.1:{}/app/audio-analyzer.html?url={}".format(
+            host_port,
+            urllib.parse.quote(_analyzer_stream_url(cfg), safe=""))
+        return True, "запущен ({})".format(name), page_url
+    except Exception as exc:
+        return False, "не удалось запустить анализатор: {}".format(exc), None
+
+
+def stop_analyzer(station_id):
+    try:
+        import docker
+        client = docker.from_env()
+        name = _analyzer_container_name(station_id)
+        for container in client.containers.list(all=True, filters={"name": name}):
+            if container.name == name:
+                container.remove(force=True)
+    except Exception:
+        pass
 
 
 # ------------------------------------------------------------------- API ---
@@ -1796,6 +1967,29 @@ def api_station_listen(station_id, which):
     if cfg is None:
         return _station_not_found()
     return _listen_response(cfg, which, station_id)
+
+
+@app.route("/api/streams/<station_id>/analyzer/start", methods=["POST"])
+def api_analyzer_start(station_id):
+    cfg = _station_config_or_404(station_id)
+    if cfg is None:
+        return _station_not_found()
+    ok, msg, page_url = start_analyzer(station_id, cfg)
+    if not ok:
+        return jsonify({"ok": False, "error": msg}), 500
+    return jsonify({"ok": True, "message": msg, "url": page_url})
+
+
+@app.route("/api/streams/<station_id>/analyzer/stop", methods=["POST"])
+def api_analyzer_stop(station_id):
+    stop_analyzer(station_id)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/streams/<station_id>/analyzer")
+def api_analyzer_state(station_id):
+    running, port = analyzer_state(station_id)
+    return jsonify({"ok": True, "running": running, "port": port})
 
 
 @app.route("/api/listen/<which>")
