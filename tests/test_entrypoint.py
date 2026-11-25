@@ -1,4 +1,7 @@
-"""Тесты entrypoint панели: автосборка образа воркера (мок Docker API)."""
+"""Тесты entrypoint панели: получение образа воркера (мок Docker API).
+
+Приоритет: локальный образ → pull из реестра (+retag) → сборка из контекста.
+"""
 
 import importlib.util
 import os
@@ -17,16 +20,34 @@ def load_entrypoint():
     return module
 
 
+class FakeImage:
+    def __init__(self):
+        self.tags = []
+
+    def tag(self, name):
+        self.tags.append(name)
+        return True
+
+
 class FakeImages:
-    def __init__(self, present):
+    def __init__(self, present, pull_error=None):
         self.present = present
+        self.pull_error = pull_error
         self.build_calls = []
+        self.pull_calls = []
 
     def get(self, name):
         import docker.errors
         if name in self.present:
-            return object()
+            return FakeImage()
         raise docker.errors.ImageNotFound("no such image")
+
+    def pull(self, name):
+        self.pull_calls.append(name)
+        if self.pull_error:
+            raise self.pull_error
+        self.last_pulled = FakeImage()
+        return self.last_pulled
 
     def build(self, **kwargs):
         self.build_calls.append(kwargs)
@@ -34,29 +55,55 @@ class FakeImages:
 
 
 class FakeClient:
-    def __init__(self, present=()):
-        self.images = FakeImages(set(present))
+    def __init__(self, present=(), pull_error=None):
+        self.images = FakeImages(set(present), pull_error=pull_error)
 
 
 class EnsureWorkerImageTest(unittest.TestCase):
     def setUp(self):
         self.entrypoint = load_entrypoint()
 
-    def test_image_present_no_build(self):
+    def test_image_present_no_pull_no_build(self):
         client = FakeClient(present=["audio-worker:2.4.2"])
         logs = []
-        ok = self.entrypoint.ensure_worker_image("audio-worker:2.4.2", client=client, log=logs.append)
+        ok = self.entrypoint.ensure_worker_image(
+            "audio-worker:2.4.2", registry_image="ghcr.io/x/y:2.4.2",
+            client=client, log=logs.append)
         self.assertTrue(ok)
+        self.assertEqual(client.images.pull_calls, [])
         self.assertEqual(client.images.build_calls, [])
         self.assertTrue(any("уже есть" in line for line in logs))
 
-    def test_image_missing_triggers_build(self):
+    def test_missing_pulls_and_retags(self):
         client = FakeClient()
+        ok = self.entrypoint.ensure_worker_image(
+            "audio-worker:2.4.2", registry_image="ghcr.io/x/y:2.4.2",
+            client=client, log=lambda line: None)
+        self.assertTrue(ok)
+        self.assertEqual(client.images.pull_calls, ["ghcr.io/x/y:2.4.2"])
+        self.assertEqual(client.images.build_calls, [])
+        # после pull локальное имя ставится тегом на скачанный образ
+        self.assertEqual(client.images.last_pulled.tags, ["audio-worker:2.4.2"])
+
+    def test_missing_pull_same_name_no_retag(self):
+        client = FakeClient()
+        ok = self.entrypoint.ensure_worker_image(
+            "ghcr.io/x/y:2.4.2", registry_image="ghcr.io/x/y:2.4.2",
+            client=client, log=lambda line: None)
+        self.assertTrue(ok)
+        self.assertEqual(client.images.pull_calls, ["ghcr.io/x/y:2.4.2"])
+        # имена совпадают — ретег не нужен
+        self.assertEqual(client.images.last_pulled.tags, [])
+
+    def test_pull_failure_falls_back_to_build(self):
+        client = FakeClient(pull_error=RuntimeError("registry down"))
         worker_dir = str(Path(__file__).resolve().parents[1] / "worker")
         with mock.patch.object(self.entrypoint, "WORKER_BUILD_CONTEXT", worker_dir):
-            ok = self.entrypoint.ensure_worker_image("audio-worker:9.9.9", client=client,
-                                                     log=lambda line: None)
+            ok = self.entrypoint.ensure_worker_image(
+                "audio-worker:9.9.9", registry_image="ghcr.io/x/y:9.9.9",
+                client=client, log=lambda line: None)
         self.assertTrue(ok)
+        self.assertEqual(client.images.pull_calls, ["ghcr.io/x/y:9.9.9"])
         self.assertEqual(len(client.images.build_calls), 1)
         call = client.images.build_calls[0]
         self.assertEqual(call["tag"], "audio-worker:9.9.9")
@@ -67,18 +114,30 @@ class EnsureWorkerImageTest(unittest.TestCase):
         with tarfile.open(fileobj=call["fileobj"]) as tar:
             self.assertIn("./Dockerfile", tar.getnames())
 
-    def test_build_error_propagates(self):
+    def test_no_registry_image_builds_directly(self):
+        client = FakeClient()
+        worker_dir = str(Path(__file__).resolve().parents[1] / "worker")
+        with mock.patch.object(self.entrypoint, "WORKER_BUILD_CONTEXT", worker_dir):
+            ok = self.entrypoint.ensure_worker_image(
+                "audio-worker:9.9.9", registry_image=None,
+                client=client, log=lambda line: None)
+        self.assertTrue(ok)
+        self.assertEqual(client.images.pull_calls, [])
+        self.assertEqual(len(client.images.build_calls), 1)
+
+    def test_build_error_propagates_after_pull_failure(self):
         class BrokenImages(FakeImages):
             def build(self, **kwargs):
                 raise RuntimeError("boom")
 
-        client = FakeClient()
-        client.images = BrokenImages(set())
+        client = FakeClient(pull_error=RuntimeError("registry down"))
+        client.images = BrokenImages(set(), pull_error=RuntimeError("registry down"))
         worker_dir = str(Path(__file__).resolve().parents[1] / "worker")
         with mock.patch.object(self.entrypoint, "WORKER_BUILD_CONTEXT", worker_dir):
             with self.assertRaises(RuntimeError):
-                self.entrypoint.ensure_worker_image("audio-worker:2.4.2", client=client,
-                                                    log=lambda line: None)
+                self.entrypoint.ensure_worker_image(
+                    "audio-worker:2.4.2", registry_image="ghcr.io/x/y:2.4.2",
+                    client=client, log=lambda line: None)
 
 
 class MainFlagTest(unittest.TestCase):
@@ -95,9 +154,20 @@ class MainFlagTest(unittest.TestCase):
     def test_autobuild_on_by_default(self):
         env = {k: v for k, v in os.environ.items()}
         env.pop("WORKER_AUTO_BUILD", None)
+        env.pop("WORKER_IMAGE", None)
+        env.pop("WORKER_REGISTRY_IMAGE", None)
         ensure, execvp = self._run_main(env)
-        ensure.assert_called_once()
+        ensure.assert_called_once_with(
+            "audio-worker:2.4.2",
+            registry_image=self.entrypoint.DEFAULT_REGISTRY_IMAGE)
         execvp.assert_called_once_with("python", ["python", "app.py"])
+
+    def test_registry_image_from_env(self):
+        env = dict(os.environ, WORKER_REGISTRY_IMAGE="ghcr.io/acme/w:1.0")
+        env.pop("WORKER_AUTO_BUILD", None)
+        ensure, _ = self._run_main(env)
+        ensure.assert_called_once_with(
+            "audio-worker:2.4.2", registry_image="ghcr.io/acme/w:1.0")
 
     def test_autobuild_disabled_by_env(self):
         env = dict(os.environ, WORKER_AUTO_BUILD="0")

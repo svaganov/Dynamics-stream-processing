@@ -3,7 +3,8 @@
 FROM savonet/liquidsoap:v2.4.2
 
 LABEL org.opencontainers.image.title="audio-worker" \
-      org.opencontainers.image.description="Liquidsoap worker for AudioPanel stations"
+      org.opencontainers.image.description="Liquidsoap worker for AudioPanel stations" \
+      org.opencontainers.image.source="https://github.com/svaganov/Dynamics-stream-processing"
 
 ENTRYPOINT ["/usr/bin/liquidsoap"]
 CMD ["/station.liq"]

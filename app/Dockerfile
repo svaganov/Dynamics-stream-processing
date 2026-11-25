@@ -4,6 +4,10 @@
 #   docker build -f app/Dockerfile -t audio-panel:2.1 .
 FROM python:3.12-slim
 
+LABEL org.opencontainers.image.title="audio-panel" \
+      org.opencontainers.image.description="Control panel for Liquidsoap audio workers" \
+      org.opencontainers.image.source="https://github.com/svaganov/Dynamics-stream-processing"
+
 WORKDIR /app
 
 # FFmpeg — только для подслушки A/B (MP3-мониторинг в браузер).

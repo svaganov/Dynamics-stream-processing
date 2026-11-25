@@ -22,7 +22,10 @@ services:
     build:
       context: .            # корень репозитория: нужен worker/ для автосборки
       dockerfile: app/Dockerfile
-    image: audio-panel:2.1
+    # На чистой машине образ скачивается из GHCR; локальная сборка —
+    # только явно: docker compose build / up -d --build
+    image: ghcr.io/svaganov/audio-panel:2.1
+    pull_policy: missing
     ports:
       - "8770:8770"
     volumes:
@@ -43,6 +46,8 @@ services:
       STREAMS_PATH: /data/streams.json
       WORKER_RUNTIME_DIR: /data/runtime
       WORKER_IMAGE: audio-worker:2.4.2
+      # Откуда скачивать образ воркера, если его нет локально (пусто — только сборка)
+      WORKER_REGISTRY_IMAGE: ghcr.io/svaganov/audio-worker:2.4.2
       WORKER_NETWORK: audiopanel_net
       WORKER_VOLUME: panel-data
       # WORKER_AUTO_BUILD: "0"   # отключить автосборку образа воркера
