@@ -443,7 +443,14 @@ function setAudioPreviewUrl(url) {
   stopAudioPreview();
 
   if (url) {
-    audio.src = url;
+    // Браузер работает на хосте: host.docker.internal доступен только внутри контейнеров
+    let previewUrl = url;
+    try {
+      const u = new URL(url);
+      if (u.hostname === 'host.docker.internal') u.hostname = window.location.hostname;
+      previewUrl = u.toString();
+    } catch (e) { /* нестандартный URL — используем как есть */ }
+    audio.src = previewUrl;
     audio.load();
     btn.disabled = false;
   } else {
