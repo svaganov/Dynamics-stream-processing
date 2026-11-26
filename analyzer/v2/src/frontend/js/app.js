@@ -695,6 +695,14 @@ function updateUI() {
   updateLufsMeters();
 }
 
+// Кусочно-линейная шкала приборов: диапазон 0..-18 занимает 2/3 высоты трека (168px из 252)
+function meterBarPx(absVal, rangeMax) {
+  const maxPx = 252, pivot = 18, pivotPx = 168;
+  const a = Math.max(0, Math.min(rangeMax, absVal));
+  if (a <= pivot) return maxPx - (a / pivot) * pivotPx;
+  return (maxPx - pivotPx) * (1 - (a - pivot) / (rangeMax - pivot));
+}
+
 // ============================================
 // Segmented DBFS Meter Animation
 // ============================================
@@ -717,10 +725,9 @@ function updateSegmentedDbfs() {
   sig.peakHoldR = phR.val;
   sig.lastPeakTimeR = phR.time;
 
-  // Bar height in px (max 252px)
-  const maxPx = 252;
-  const pxL = maxPx - (Math.abs(dbfsL) / 70) * maxPx;
-  const pxR = maxPx - (Math.abs(dbfsR) / 70) * maxPx;
+  // Bar height in px (piecewise scale, max 252px)
+  const pxL = meterBarPx(Math.abs(dbfsL), 70);
+  const pxR = meterBarPx(Math.abs(dbfsR), 70);
   console.log('[DBFS] L=' + dbfsL.toFixed(1) + ' px=' + pxL.toFixed(0) + ' | R=' + dbfsR.toFixed(1) + ' px=' + pxR.toFixed(0));
 
   const containerL = document.getElementById('dbfsBarContainerL');
@@ -757,8 +764,8 @@ function updateSegmentedDbfs() {
   // Peak hold lines
   const peakL = document.getElementById('dbfsPeakL');
   const peakR = document.getElementById('dbfsPeakR');
-  const holdPxL = maxPx - (Math.abs(sig.peakHoldL) / 70) * maxPx;
-  const holdPxR = maxPx - (Math.abs(sig.peakHoldR) / 70) * maxPx;
+  const holdPxL = meterBarPx(Math.abs(sig.peakHoldL), 70);
+  const holdPxR = meterBarPx(Math.abs(sig.peakHoldR), 70);
   if (peakL) peakL.style.bottom = (4 + holdPxL) + 'px';
   if (peakR) peakR.style.bottom = (4 + holdPxR) + 'px';
 
@@ -850,11 +857,10 @@ function updateLufsMeters() {
   const clampI = Math.max(-40, Math.min(0, i));
   const clampTP = Math.max(-6, Math.min(0, tp));
 
-  // Bar heights (0..-40 scale, max 252px)
-  const maxPx = 252;
-  const pxM = maxPx - (Math.abs(clampM) / 40) * maxPx;
-  const pxS = maxPx - (Math.abs(clampS) / 40) * maxPx;
-  const pxI = maxPx - (Math.abs(clampI) / 40) * maxPx;
+  // Bar heights (piecewise scale, max 252px)
+  const pxM = meterBarPx(Math.abs(clampM), 40);
+  const pxS = meterBarPx(Math.abs(clampS), 40);
+  const pxI = meterBarPx(Math.abs(clampI), 40);
 
   const containerM = document.getElementById('lufsBarContainerM');
   const containerS = document.getElementById('lufsBarContainerS');
@@ -924,15 +930,14 @@ function updateLufsMeters() {
   const holdM = Math.max(clampM, -20 + Math.sin(time * 0.5) * 3);
   const holdS = Math.max(clampS, -22 + Math.sin(time * 0.3) * 2);
   const holdI = Math.max(clampI, -24 + Math.sin(time * 0.2) * 1);
-  if (peakM) peakM.style.bottom = (4 + maxPx - (Math.abs(holdM) / 40) * maxPx) + 'px';
-  if (peakS) peakS.style.bottom = (4 + maxPx - (Math.abs(holdS) / 40) * maxPx) + 'px';
-  if (peakI) peakI.style.bottom = (4 + maxPx - (Math.abs(holdI) / 40) * maxPx) + 'px';
+  if (peakM) peakM.style.bottom = (4 + meterBarPx(Math.abs(holdM), 40)) + 'px';
+  if (peakS) peakS.style.bottom = (4 + meterBarPx(Math.abs(holdS), 40)) + 'px';
+  if (peakI) peakI.style.bottom = (4 + meterBarPx(Math.abs(holdI), 40)) + 'px';
 
   // TP line on M scale
   const tpLineM = document.getElementById('lufsTpLineM');
   if (tpLineM) {
-    const tpPx = maxPx - (Math.abs(clampTP) / 6) * maxPx;
-    tpLineM.style.bottom = (4 + tpPx) + 'px';
+    tpLineM.style.bottom = (4 + meterBarPx(Math.abs(clampTP), 40)) + 'px';
   }
 }
 

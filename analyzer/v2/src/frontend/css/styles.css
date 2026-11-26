@@ -855,10 +855,6 @@ html, body {
 .audio-meters-row .lufs-meter__tp-line {
   width: 36px;
 }
-.audio-meters-row .dbfs-readouts,
-.audio-meters-row .lufs-readouts {
-  gap: 12px;
-}
 .audio-meters-row .dbfs-readout,
 .audio-meters-row .lufs-readout {
   padding: 4px 6px;
@@ -950,15 +946,17 @@ html, body {
 }
 .tick--right .tick__number { text-align: left; }
 .tick-0  { top: 0%; }
-.tick-2  { top: 2.86%; }
-.tick-9  { top: 12.86%; }
-.tick-18 { top: 25.71%; }
-.tick-20 { top: 28.57%; }
-.tick-30 { top: 42.86%; }
-.tick-40 { top: 57.14%; }
-.tick-50 { top: 71.43%; }
-.tick-60 { top: 85.71%; }
-.tick-70 { top: 100%; }
+.tick-2  { top: 7.18%; }
+.tick-6  { top: 21.54%; }
+.tick-9  { top: 32.31%; }
+.tick-12 { top: 43.08%; }
+.tick-15 { top: 53.85%; }
+.tick-18 { top: 64.62%; }
+.tick-30 { top: 72.07%; }
+.tick-40 { top: 78.28%; }
+.tick-50 { top: 84.50%; }
+.tick-60 { top: 90.71%; }
+.tick-70 { top: 96.92%; }
 
 /* Scale */
 .dbfs-meter__scale {
@@ -980,10 +978,10 @@ html, body {
   position: absolute;
   left: 0; right: 0;
 }
-.zone--red    { top: 0%;      height: 2.86%;   background: rgba(255, 68, 68, 0.15); }
-.zone--orange { top: 2.86%;   height: 10.0%;   background: rgba(255, 102, 0, 0.05); }
-.zone--yellow { top: 12.86%;  height: 12.86%;  background: rgba(255, 170, 0, 0.05); }
-.zone--green  { top: 25.71%;  height: 60.0%;   background: rgba(0, 204, 102, 0.05); }
+.zone--red    { top: 0%;      height: 7.18%;   background: rgba(255, 68, 68, 0.15); }
+.zone--orange { top: 7.18%;   height: 25.13%;  background: rgba(255, 102, 0, 0.05); }
+.zone--yellow { top: 32.31%;  height: 32.31%;  background: rgba(255, 170, 0, 0.05); }
+.zone--green  { top: 64.62%;  height: 26.09%;  background: rgba(0, 204, 102, 0.05); }
 
 /* Segmented bar container */
 .dbfs-meter__bar-container {
@@ -1002,10 +1000,10 @@ html, body {
   position: absolute;
   left: 0; right: 0;
 }
-.seg--green  { bottom: 36px;  height: 151px; background: var(--meter-green); }
-.seg--yellow { bottom: 187px; height: 33px;  background: var(--meter-yellow); }
-.seg--orange { bottom: 220px; height: 25px;  background: var(--meter-orange); }
-.seg--red    { bottom: 245px; height: 7px;   background: var(--meter-red); }
+.seg--green  { bottom: 16.2px;  height: 67.8px; background: var(--meter-green); }
+.seg--yellow { bottom: 84px;   height: 84px;   background: var(--meter-yellow); }
+.seg--orange { bottom: 168px;  height: 65.3px; background: var(--meter-orange); }
+.seg--red    { bottom: 233.3px; height: 18.7px; background: var(--meter-red); }
 
 /* Peak hold line */
 .dbfs-meter__peak {
@@ -1021,19 +1019,16 @@ html, body {
 }
 
 /* DBFS Readouts */
-.dbfs-readouts {
-  display: grid;
-  grid-template-columns: 104px 104px;
-  gap: 40px;
-  margin-top: 4px;
-  width: 248px;
-  justify-content: center;
+.dbfs-readouts__column,
+.lufs-readouts__column {
+  margin-top: 6px;
 }
 .dbfs-readouts__column {
   display: flex;
   flex-direction: column;
   gap: 8px;
   align-items: center;
+  width: 104px;
 }
 .dbfs-readout {
   display: flex;
@@ -1134,14 +1129,14 @@ html, body {
 }
 .lufs-tick--right .lufs-tick__number { text-align: left; }
 .lufs-tick-0  { top: 0%; }
-.lufs-tick-5  { top: 12.5%; }
-.lufs-tick-10 { top: 25%; }
-.lufs-tick-15 { top: 37.5%; }
-.lufs-tick-20 { top: 50%; }
-.lufs-tick-23 { top: 57.5%; }
-.lufs-tick-26 { top: 65%; }
-.lufs-tick-30 { top: 75%; }
-.lufs-tick-40 { top: 100%; }
+.lufs-tick-5  { top: 17.95%; }
+.lufs-tick-10 { top: 35.90%; }
+.lufs-tick-15 { top: 53.85%; }
+.lufs-tick-18 { top: 64.62%; }
+.lufs-tick-23 { top: 71.96%; }
+.lufs-tick-26 { top: 76.36%; }
+.lufs-tick-30 { top: 82.24%; }
+.lufs-tick-40 { top: 96.92%; }
 
 /* Scale */
 .lufs-meter__scale {
@@ -1163,9 +1158,9 @@ html, body {
   position: absolute;
   left: 0; right: 0;
 }
-.lufs-zone--red    { top: 0%;      height: 58.75%;  background: rgba(255, 68, 68, 0.10); }
-.lufs-zone--yellow { top: 58.75%;  height: 6.25%;   background: rgba(255, 170, 0, 0.10); }
-.lufs-zone--green  { top: 65%;     height: 35%;     background: rgba(0, 204, 102, 0.10); }
+.lufs-zone--red    { top: 0%;      height: 72.7%;   background: rgba(255, 68, 68, 0.10); }
+.lufs-zone--yellow { top: 72.7%;   height: 3.7%;    background: rgba(255, 170, 0, 0.10); }
+.lufs-zone--green  { top: 76.4%;   height: 23.6%;   background: rgba(0, 204, 102, 0.10); }
 
 /* Segmented bar */
 .lufs-meter__bar-container {
@@ -1185,9 +1180,9 @@ html, body {
   left: 0;
   right: 0;
 }
-.lufs-seg--green  { bottom: 0px;   height: 163px;  background: var(--meter-green); }
-.lufs-seg--yellow { bottom: 163px; height: 16px;   background: var(--meter-yellow); }
-.lufs-seg--red    { bottom: 179px; height: 73px;   background: var(--meter-red); }
+.lufs-seg--green  { bottom: 0px;    height: 53.5px;  background: var(--meter-green); }
+.lufs-seg--yellow { bottom: 53.5px; height: 9.4px;   background: var(--meter-yellow); }
+.lufs-seg--red    { bottom: 62.9px; height: 189.1px; background: var(--meter-red); }
 
 /* Peak hold line */
 .lufs-meter__peak {
@@ -1216,18 +1211,12 @@ html, body {
 }
 
 /* LUFS Readouts */
-.lufs-readouts {
-  display: grid;
-  grid-template-columns: 104px 104px 104px;
-  gap: 40px;
-  margin-top: 4px;
-  justify-content: center;
-}
 .lufs-readouts__column {
   display: flex;
   flex-direction: column;
   gap: 8px;
   align-items: center;
+  width: 104px;
 }
 .lufs-readout {
   display: flex;

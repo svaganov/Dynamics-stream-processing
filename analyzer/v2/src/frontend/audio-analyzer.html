@@ -96,9 +96,11 @@
                       <div class="dbfs-meter__ticks-panel">
                         <div class="tick tick-0"><div class="tick__line"></div><div class="tick__number" style="color:var(--meter-red);font-weight:bold;">0</div></div>
                         <div class="tick tick-2"><div class="tick__line"></div><div class="tick__number" style="color:var(--meter-red);font-weight:bold;">2</div></div>
-                        <div class="tick tick-9"><div class="tick__line"></div><div class="tick__number" style="color:var(--meter-yellow);font-weight:bold;">9</div></div>
+                        <div class="tick tick-6"><div class="tick__line"></div><div class="tick__number" style="color:var(--meter-orange);font-weight:bold;">6</div></div>
+                        <div class="tick tick-9"><div class="tick__line"></div><div class="tick__number" style="color:var(--meter-orange);font-weight:bold;">9</div></div>
+                        <div class="tick tick-12"><div class="tick__line"></div><div class="tick__number" style="color:var(--meter-yellow);font-weight:bold;">12</div></div>
+                        <div class="tick tick-15"><div class="tick__line"></div><div class="tick__number" style="color:var(--meter-yellow);font-weight:bold;">15</div></div>
                         <div class="tick tick-18"><div class="tick__line"></div><div class="tick__number" style="color:var(--meter-yellow);font-weight:bold;">18</div></div>
-                        <div class="tick tick-20"><div class="tick__line"></div><div class="tick__number">20</div></div>
                         <div class="tick tick-30"><div class="tick__line"></div><div class="tick__number">30</div></div>
                         <div class="tick tick-40"><div class="tick__line"></div><div class="tick__number">40</div></div>
                         <div class="tick tick-50"><div class="tick__line"></div><div class="tick__number">50</div></div>
@@ -119,6 +121,18 @@
                           <div class="seg seg--red"></div>
                         </div>
                         <div class="dbfs-meter__peak" id="dbfsPeakL" style="bottom:249px;"></div>
+                      </div>
+                    </div>
+                    <div class="dbfs-readouts__column">
+                      <div class="dbfs-readout">
+                        <div class="dbfs-readout__label">PEAK HOLD L</div>
+                        <div class="dbfs-readout__value dbfs-readout__value--danger" id="peakHoldL">-1.0</div>
+                        <div class="dbfs-readout__value dbfs-readout__value--danger">dBFS</div>
+                      </div>
+                      <div class="dbfs-readout">
+                        <div class="dbfs-readout__label">L</div>
+                        <div class="dbfs-readout__value dbfs-readout__value--danger" id="dbfsValL">-1.0</div>
+                        <div class="dbfs-readout__value dbfs-readout__value--danger">dBFS</div>
                       </div>
                     </div>
                   </div>
@@ -144,9 +158,11 @@
                       <div class="dbfs-meter__ticks-panel dbfs-meter__ticks-panel--right">
                         <div class="tick tick-0 tick--right"><div class="tick__line"></div><div class="tick__number" style="color:var(--meter-red);font-weight:bold;">0</div></div>
                         <div class="tick tick-2 tick--right"><div class="tick__line"></div><div class="tick__number" style="color:var(--meter-red);font-weight:bold;">2</div></div>
-                        <div class="tick tick-9 tick--right"><div class="tick__line"></div><div class="tick__number" style="color:var(--meter-yellow);font-weight:bold;">9</div></div>
+                        <div class="tick tick-6 tick--right"><div class="tick__line"></div><div class="tick__number" style="color:var(--meter-orange);font-weight:bold;">6</div></div>
+                        <div class="tick tick-9 tick--right"><div class="tick__line"></div><div class="tick__number" style="color:var(--meter-orange);font-weight:bold;">9</div></div>
+                        <div class="tick tick-12 tick--right"><div class="tick__line"></div><div class="tick__number" style="color:var(--meter-yellow);font-weight:bold;">12</div></div>
+                        <div class="tick tick-15 tick--right"><div class="tick__line"></div><div class="tick__number" style="color:var(--meter-yellow);font-weight:bold;">15</div></div>
                         <div class="tick tick-18 tick--right"><div class="tick__line"></div><div class="tick__number" style="color:var(--meter-yellow);font-weight:bold;">18</div></div>
-                        <div class="tick tick-20 tick--right"><div class="tick__line"></div><div class="tick__number">20</div></div>
                         <div class="tick tick-30 tick--right"><div class="tick__line"></div><div class="tick__number">30</div></div>
                         <div class="tick tick-40 tick--right"><div class="tick__line"></div><div class="tick__number">40</div></div>
                         <div class="tick tick-50 tick--right"><div class="tick__line"></div><div class="tick__number">50</div></div>
@@ -154,31 +170,17 @@
                         <div class="tick tick-70 tick--right"><div class="tick__line"></div><div class="tick__number">70</div></div>
                       </div>
                     </div>
-                  </div>
-                </div>
-                <div class="dbfs-readouts">
-                  <div class="dbfs-readouts__column">
-                    <div class="dbfs-readout">
-                      <div class="dbfs-readout__label">L</div>
-                      <div class="dbfs-readout__value dbfs-readout__value--danger" id="dbfsValL">-1.0</div>
-                      <div class="dbfs-readout__value dbfs-readout__value--danger">dBFS</div>
-                    </div>
-                    <div class="dbfs-readout">
-                      <div class="dbfs-readout__label">PEAK HOLD L</div>
-                      <div class="dbfs-readout__value dbfs-readout__value--danger" id="peakHoldL">-1.0</div>
-                      <div class="dbfs-readout__value dbfs-readout__value--danger">dBFS</div>
-                    </div>
-                  </div>
-                  <div class="dbfs-readouts__column">
-                    <div class="dbfs-readout">
-                      <div class="dbfs-readout__label">R</div>
-                      <div class="dbfs-readout__value dbfs-readout__value--danger" id="dbfsValR">-1.5</div>
-                      <div class="dbfs-readout__value dbfs-readout__value--danger">dBFS</div>
-                    </div>
-                    <div class="dbfs-readout">
-                      <div class="dbfs-readout__label">PEAK HOLD R</div>
-                      <div class="dbfs-readout__value dbfs-readout__value--danger" id="peakHoldR">-1.0</div>
-                      <div class="dbfs-readout__value dbfs-readout__value--danger">dBFS</div>
+                    <div class="dbfs-readouts__column">
+                      <div class="dbfs-readout">
+                        <div class="dbfs-readout__label">PEAK HOLD R</div>
+                        <div class="dbfs-readout__value dbfs-readout__value--danger" id="peakHoldR">-1.0</div>
+                        <div class="dbfs-readout__value dbfs-readout__value--danger">dBFS</div>
+                      </div>
+                      <div class="dbfs-readout">
+                        <div class="dbfs-readout__label">R</div>
+                        <div class="dbfs-readout__value dbfs-readout__value--danger" id="dbfsValR">-1.5</div>
+                        <div class="dbfs-readout__value dbfs-readout__value--danger">dBFS</div>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -200,7 +202,7 @@
                         <div class="lufs-tick lufs-tick-5"><div class="lufs-tick__line"></div><div class="lufs-tick__number" style="color:var(--meter-red);font-weight:bold;">5</div></div>
                         <div class="lufs-tick lufs-tick-10"><div class="lufs-tick__line"></div><div class="lufs-tick__number" style="color:var(--meter-red);font-weight:bold;">10</div></div>
                         <div class="lufs-tick lufs-tick-15"><div class="lufs-tick__line"></div><div class="lufs-tick__number" style="color:var(--meter-red);font-weight:bold;">15</div></div>
-                        <div class="lufs-tick lufs-tick-20"><div class="lufs-tick__line"></div><div class="lufs-tick__number" style="color:var(--meter-red);font-weight:bold;">20</div></div>
+                        <div class="lufs-tick lufs-tick-18"><div class="lufs-tick__line"></div><div class="lufs-tick__number" style="color:var(--meter-red);font-weight:bold;">18</div></div>
                         <div class="lufs-tick lufs-tick-23"><div class="lufs-tick__line"></div><div class="lufs-tick__number" style="color:var(--meter-yellow);font-weight:bold;">23</div></div>
                         <div class="lufs-tick lufs-tick-26"><div class="lufs-tick__line"></div><div class="lufs-tick__number" style="color:var(--meter-yellow);font-weight:bold;">26</div></div>
                         <div class="lufs-tick lufs-tick-30"><div class="lufs-tick__line"></div><div class="lufs-tick__number">30</div></div>
@@ -221,6 +223,18 @@
                         <div class="lufs-meter__tp-line" id="lufsTpLineM" style="bottom:230px;"></div>
                       </div>
                     </div>
+                    <div class="lufs-readouts__column">
+                      <div class="lufs-readout">
+                        <div class="lufs-readout__label">TP</div>
+                        <div class="lufs-readout__value lufs-readout__value--danger" id="tpValM">-1.0</div>
+                        <div class="lufs-readout__value lufs-readout__value--danger">dBTP</div>
+                      </div>
+                      <div class="lufs-readout">
+                        <div class="lufs-readout__label">M</div>
+                        <div class="lufs-readout__value lufs-readout__value--warning" id="lufsValM">-23.5</div>
+                        <div class="lufs-readout__value lufs-readout__value--warning">LUFS</div>
+                      </div>
+                    </div>
                   </div>
 
                   <!-- S (Short-term) -->
@@ -232,7 +246,7 @@
                         <div class="lufs-tick lufs-tick-5"><div class="lufs-tick__line"></div><div class="lufs-tick__number" style="color:var(--meter-red);font-weight:bold;">5</div></div>
                         <div class="lufs-tick lufs-tick-10"><div class="lufs-tick__line"></div><div class="lufs-tick__number" style="color:var(--meter-red);font-weight:bold;">10</div></div>
                         <div class="lufs-tick lufs-tick-15"><div class="lufs-tick__line"></div><div class="lufs-tick__number" style="color:var(--meter-red);font-weight:bold;">15</div></div>
-                        <div class="lufs-tick lufs-tick-20"><div class="lufs-tick__line"></div><div class="lufs-tick__number" style="color:var(--meter-red);font-weight:bold;">20</div></div>
+                        <div class="lufs-tick lufs-tick-18"><div class="lufs-tick__line"></div><div class="lufs-tick__number" style="color:var(--meter-red);font-weight:bold;">18</div></div>
                         <div class="lufs-tick lufs-tick-23"><div class="lufs-tick__line"></div><div class="lufs-tick__number" style="color:var(--meter-yellow);font-weight:bold;">23</div></div>
                         <div class="lufs-tick lufs-tick-26"><div class="lufs-tick__line"></div><div class="lufs-tick__number" style="color:var(--meter-yellow);font-weight:bold;">26</div></div>
                         <div class="lufs-tick lufs-tick-30"><div class="lufs-tick__line"></div><div class="lufs-tick__number">30</div></div>
@@ -252,6 +266,18 @@
                         <div class="lufs-meter__peak" id="lufsPeakS" style="bottom:249px;"></div>
                       </div>
                     </div>
+                    <div class="lufs-readouts__column">
+                      <div class="lufs-readout">
+                        <div class="lufs-readout__label">S</div>
+                        <div class="lufs-readout__value lufs-readout__value--safe" id="lufsValS">-24.2</div>
+                        <div class="lufs-readout__value lufs-readout__value--safe">LUFS</div>
+                      </div>
+                      <div class="lufs-readout">
+                        <div class="lufs-readout__label">LRA</div>
+                        <div class="lufs-readout__value lufs-readout__value--safe" id="lraVal">4.1</div>
+                        <div class="lufs-readout__value lufs-readout__value--safe">LU</div>
+                      </div>
+                    </div>
                   </div>
 
                   <!-- I (Integrated) -->
@@ -263,7 +289,7 @@
                         <div class="lufs-tick lufs-tick-5"><div class="lufs-tick__line"></div><div class="lufs-tick__number" style="color:var(--meter-red);font-weight:bold;">5</div></div>
                         <div class="lufs-tick lufs-tick-10"><div class="lufs-tick__line"></div><div class="lufs-tick__number" style="color:var(--meter-red);font-weight:bold;">10</div></div>
                         <div class="lufs-tick lufs-tick-15"><div class="lufs-tick__line"></div><div class="lufs-tick__number" style="color:var(--meter-red);font-weight:bold;">15</div></div>
-                        <div class="lufs-tick lufs-tick-20"><div class="lufs-tick__line"></div><div class="lufs-tick__number" style="color:var(--meter-red);font-weight:bold;">20</div></div>
+                        <div class="lufs-tick lufs-tick-18"><div class="lufs-tick__line"></div><div class="lufs-tick__number" style="color:var(--meter-red);font-weight:bold;">18</div></div>
                         <div class="lufs-tick lufs-tick-23"><div class="lufs-tick__line"></div><div class="lufs-tick__number" style="color:var(--meter-yellow);font-weight:bold;">23</div></div>
                         <div class="lufs-tick lufs-tick-26"><div class="lufs-tick__line"></div><div class="lufs-tick__number" style="color:var(--meter-yellow);font-weight:bold;">26</div></div>
                         <div class="lufs-tick lufs-tick-30"><div class="lufs-tick__line"></div><div class="lufs-tick__number">30</div></div>
@@ -283,43 +309,12 @@
                         <div class="lufs-meter__peak" id="lufsPeakI" style="bottom:249px;"></div>
                       </div>
                     </div>
-                  </div>
-                </div>
-                <div class="lufs-readouts">
-                  <div class="lufs-readouts__column">
-                    <div class="lufs-readout">
-                      <div class="lufs-readout__label">M</div>
-                      <div class="lufs-readout__value lufs-readout__value--warning" id="lufsValM">-23.5</div>
-                      <div class="lufs-readout__value lufs-readout__value--warning">LUFS</div>
-                    </div>
-                    <div class="lufs-readout">
-                      <div class="lufs-readout__label">TP</div>
-                      <div class="lufs-readout__value lufs-readout__value--danger" id="tpValM">-1.0</div>
-                      <div class="lufs-readout__value lufs-readout__value--danger">dBTP</div>
-                    </div>
-                  </div>
-                  <div class="lufs-readouts__column">
-                    <div class="lufs-readout">
-                      <div class="lufs-readout__label">S</div>
-                      <div class="lufs-readout__value lufs-readout__value--safe" id="lufsValS">-24.2</div>
-                      <div class="lufs-readout__value lufs-readout__value--safe">LUFS</div>
-                    </div>
-                    <div class="lufs-readout">
-                      <div class="lufs-readout__label">LRA</div>
-                      <div class="lufs-readout__value lufs-readout__value--safe" id="lraVal">4.1</div>
-                      <div class="lufs-readout__value lufs-readout__value--safe">LU</div>
-                    </div>
-                  </div>
-                  <div class="lufs-readouts__column">
-                    <div class="lufs-readout">
-                      <div class="lufs-readout__label">I</div>
-                      <div class="lufs-readout__value lufs-readout__value--safe" id="lufsValI">-25.8</div>
-                      <div class="lufs-readout__value lufs-readout__value--safe">LUFS</div>
-                    </div>
-                    <div class="lufs-readout" style="visibility:hidden;">
-                      <div class="lufs-readout__label">&nbsp;</div>
-                      <div class="lufs-readout__value">&nbsp;</div>
-                      <div class="lufs-readout__value">&nbsp;</div>
+                    <div class="lufs-readouts__column">
+                      <div class="lufs-readout">
+                        <div class="lufs-readout__label">I</div>
+                        <div class="lufs-readout__value lufs-readout__value--safe" id="lufsValI">-25.8</div>
+                        <div class="lufs-readout__value lufs-readout__value--safe">LUFS</div>
+                      </div>
                     </div>
                   </div>
                 </div>
