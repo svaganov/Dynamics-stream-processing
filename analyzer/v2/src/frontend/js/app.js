@@ -489,7 +489,7 @@ function updatePreviewIcon(playing) {
   if (!btn || !icon || !label) return;
 
   btn.classList.toggle('is-playing', playing);
-  label.textContent = playing ? 'Stop' : 'Listen';
+  label.textContent = playing ? 'Стоп' : 'Слушать';
 
   if (playing) {
     // Muted / stop icon (speaker with cross)

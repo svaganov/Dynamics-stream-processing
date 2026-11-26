@@ -18,3 +18,4 @@ __pycache__/
 # Локальный override compose (например, порт панели занят Hyper-V-диапазоном)
 docker-compose.override.yml
 
+.design-ref/
