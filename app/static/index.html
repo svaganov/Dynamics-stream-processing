@@ -35,6 +35,9 @@
 
   <div class="station-picker" aria-label="Станции">
     <select id="stationSelect" aria-label="Выбранная станция" hidden></select>
+    <button class="btn only-dashboard" id="btnExportSettings" title="Скачать реестр станций файлом (streams.json)">⇩ Экспорт</button>
+    <button class="btn only-dashboard" id="btnImportSettings" title="Загрузить реестр станций из файла (заменяет текущие настройки)">⇑ Импорт</button>
+    <input type="file" id="importFile" accept=".json,application/json" hidden>
     <button class="btn" id="btnAddStation" title="Добавить поток">+ Поток</button>
     <button class="btn danger only-station" id="btnDeleteStation" title="Удалить выбранную станцию">Удалить</button>
   </div>
@@ -369,6 +372,6 @@
 
 <div class="toast" id="toast"></div>
 
-<script src="/static/app.js?v=10"></script>
+<script src="/static/app.js?v=11"></script>
 </body>
 </html>

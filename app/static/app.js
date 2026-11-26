@@ -1116,6 +1116,62 @@ $("btnDeleteStation").addEventListener("click", async () => {
   }
 });
 
+/* ---------- экспорт / импорт реестра ---------- */
+
+$("btnExportSettings").addEventListener("click", () => {
+  // отдаём как скачивание через навигацию — браузер сохранит файл
+  location.href = "/api/registry/export";
+});
+
+$("btnImportSettings").addEventListener("click", () => {
+  $("importFile").click();
+});
+
+$("importFile").addEventListener("change", async (ev) => {
+  const file = ev.target.files && ev.target.files[0];
+  ev.target.value = "";
+  if (!file) return;
+  let doc;
+  try {
+    doc = JSON.parse(await file.text());
+  } catch (e) {
+    toast("Это не JSON-файл настроек панели", true);
+    return;
+  }
+  const imported = Array.isArray(doc && doc.streams) ? doc.streams.length : 0;
+  const current = streamsDoc && Array.isArray(streamsDoc.streams) ? streamsDoc.streams.length : 0;
+  if (!confirm(
+    "Импорт заменит текущие " + current + " станций на " + imported +
+    " из файла «" + file.name + "».\n" +
+    "Перед заменой сервер сохранит резервную копию реестра.\n" +
+    "Работающие станции продолжат эфир со старыми настройками до перезапуска.\n\n" +
+    "Продолжить?")) return;
+  try {
+    const res = await fetch("/api/registry/import", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(doc),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      toast(data.error || "Импорт не удался", true);
+      return;
+    }
+    drafts.clear();
+    const stillThere = currentStationId && Array.isArray(doc.streams) &&
+      doc.streams.some((s) => s && s.id === currentStationId);
+    if (currentStationId && !stillThere) {
+      currentStationId = null;
+      stopListen();
+    }
+    await loadStreams();
+    toast("Импортировано станций: " + data.stations);
+    if (currentView() === "station" && !currentStationId) location.hash = "#/";
+  } catch (e) {
+    toast("Импорт не удался", true);
+  }
+});
+
 /* ---------- actions ---------- */
 
 async function postJSON(url, body) {

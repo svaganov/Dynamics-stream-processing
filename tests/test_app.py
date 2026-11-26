@@ -251,6 +251,44 @@ class PanelApiTest(unittest.TestCase):
 
         self.assertEqual(self.client.delete("/api/streams/missing").status_code, 404)
 
+    def test_registry_export_import(self):
+        # Две станции с разными точками выхода
+        self.client.post("/api/streams", json={"name": "Радио 2"})
+        self.client.put("/api/streams/station-2",
+                        json={"source": {"url": "http://127.0.0.1:9000/radio2"}})
+
+        # Экспорт: JSON-файл на скачивание с полным реестром
+        res = self.client.get("/api/registry/export")
+        self.assertEqual(res.status_code, 200)
+        self.assertIn("attachment", res.headers.get("Content-Disposition", ""))
+        exported = json.loads(res.data.decode("utf-8"))
+        self.assertEqual([s["id"] for s in exported["streams"]],
+                         ["station-1", "station-2"])
+        self.assertEqual(exported["streams"][1]["source"]["url"],
+                         "http://127.0.0.1:9000/radio2")
+
+        # Импорт заменяет реестр и делает бэкап прежнего streams.json
+        exported["streams"] = [s for s in exported["streams"]
+                               if s["id"] == "station-2"]
+        res = self.client.post("/api/registry/import", json=exported)
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.get_json(), {"ok": True, "stations": 1})
+        data = self.client.get("/api/streams").get_json()
+        self.assertEqual([s["id"] for s in data["streams"]], ["station-2"])
+        backups = list(self.tmp_path.glob("streams.json.bak-*"))
+        self.assertEqual(len(backups), 1)
+
+        # Некорректный файл не трогает реестр
+        res = self.client.post("/api/registry/import", json={"foo": []})
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("streams", res.get_json()["error"])
+        dup = {"streams": [{"id": "a"}, {"id": "a"}]}
+        res = self.client.post("/api/registry/import", json=dup)
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("дважды", res.get_json()["error"])
+        data = self.client.get("/api/streams").get_json()
+        self.assertEqual([s["id"] for s in data["streams"]], ["station-2"])
+
     def test_non_json_body_rejected_not_silently_defaulted(self):
         # Тело без Content-Type: application/json раньше молча превращалось
         # в дефолтную станцию — конфиг клиента терялся. Теперь — явная 400.

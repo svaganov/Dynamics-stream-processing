@@ -1710,6 +1710,76 @@ def api_settings():
     return jsonify({"ok": True, "settings": settings})
 
 
+@app.route("/api/registry/export", methods=["GET"])
+def api_registry_export():
+    """Отдаёт весь реестр станций (streams.json) файлом на скачивание."""
+    doc = load_streams()
+    payload = json.dumps(doc, ensure_ascii=False, indent=2).encode("utf-8")
+    fname = "audiopanel-settings-{}.json".format(time.strftime("%Y%m%d-%H%M%S"))
+    return Response(payload, mimetype="application/json", headers={
+        "Content-Disposition": "attachment; filename={}".format(fname),
+        "Cache-Control": "no-cache, no-store",
+    })
+
+
+def _validate_registry_doc(doc):
+    """Проверяет импортируемый реестр: структура, id станций, уникальность
+    точек Icecast. Выбрасывает ValueError с понятным сообщением."""
+    if not isinstance(doc, dict):
+        raise ValueError("ожидался JSON-объект реестра")
+    streams = doc.get("streams")
+    if not isinstance(streams, list):
+        raise ValueError("в файле нет списка станций (streams)")
+    used_ids = set()
+    used_targets = set()
+    for station in streams:
+        if not isinstance(station, dict) or "id" not in station:
+            raise ValueError("у одной из станций нет id")
+        sid = str(station["id"])
+        if not STATION_ID_RE.match(sid):
+            raise ValueError("недопустимый id станции «{}» "
+                             "(латиница, цифры, '-' и '_')".format(sid))
+        if sid in used_ids:
+            raise ValueError("id станции «{}» встречается дважды".format(sid))
+        used_ids.add(sid)
+        for out in get_outputs(station):
+            ice = out["icecast"]
+            target = (str(ice["host"]).lower(), ice["port"], ice["mount"])
+            if target in used_targets:
+                raise ValueError("точка Icecast {}:{}{} используется дважды "
+                                 "(станция «{}»)".format(ice["host"], ice["port"],
+                                                         ice["mount"], sid))
+            used_targets.add(target)
+
+
+@app.route("/api/registry/import", methods=["POST"])
+def api_registry_import():
+    """Заменяет весь реестр станций содержимым загруженного файла.
+
+    Перед заменой текущий streams.json копируется в streams.json.bak-<дата>.
+    Работающие станции продолжают эфир со старыми настройками до перезапуска."""
+    body = request.get_json(silent=True)
+    if body is None:
+        return jsonify({"ok": False,
+                        "error": "некорректный JSON в теле запроса"}), 400
+    # Валидация до нормализации обязательна: она переименовала бы дубли id
+    # и добила битый файл до валидного реестра — импорт молча затёр бы станции.
+    try:
+        _validate_registry_doc(body)
+        normalized = _normalize_streams_doc(body)
+        _validate_registry_doc(normalized)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    try:
+        if os.path.exists(STREAMS_PATH):
+            shutil.copy2(STREAMS_PATH, "{}.bak-{}".format(
+                STREAMS_PATH, time.strftime("%Y%m%d-%H%M%S")))
+    except OSError:
+        pass  # бэкап не удался — не блокируем импорт, реестр атомарен сам
+    save_streams(normalized)
+    return jsonify({"ok": True, "stations": len(normalized["streams"])})
+
+
 def _start_station(station_id):
     cfg = _station_config_or_404(station_id)
     if cfg is None:
